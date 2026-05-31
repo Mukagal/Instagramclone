@@ -1,0 +1,3230 @@
+/**
+ * api.js — Typed wrappers for every FastAPI endpoint
+ *
+ * Usage:
+ *   import api from './api.js';
+ *   const feed = await api.feed.getExplore({ limit: 20 });
+ */
+
+const BASE_URL = 'http://127.0.0.1:8000/api/v1';   // ← adjust to your FastAPI base path
+
+// ── Auth helpers ──────────────────────────────
+const storage = {
+  getToken()        { return localStorage.getItem('access_token'); },
+  setTokens(a, r)   { localStorage.setItem('access_token', a); localStorage.setItem('refresh_token', r); },
+  clearTokens()     { localStorage.removeItem('access_token'); localStorage.removeItem('refresh_token'); },
+  getRefreshToken() { return localStorage.getItem('refresh_token'); },
+};
+
+// ── Core fetch wrapper ────────────────────────
+async function request(method, path, { body, params, form, signal } = {}) {
+  const url = new URL(BASE_URL + path, window.location.origin);
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null) url.searchParams.set(k, v);
+    });
+  }
+
+  const headers = {};
+  const token = storage.getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  let bodyPayload = undefined;
+  if (form) {
+    // multipart/form-data
+    bodyPayload = form;
+  } else if (body) {
+    headers['Content-Type'] = 'application/json';
+    bodyPayload = JSON.stringify(body);
+  }
+
+  let res = await fetch(url, { method, headers, body: bodyPayload, signal });
+
+  // Auto-refresh on 401
+  if (res.status === 401 && storage.getRefreshToken()) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) {
+      headers['Authorization'] = `Bearer ${storage.getToken()}`;
+      res = await fetch(url, { method, headers, body: bodyPayload, signal });
+    }
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw Object.assign(new Error(err.detail || 'Request failed'), { status: res.status, data: err });
+  }
+
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+const get    = (path, opts) => request('GET',    path, opts);
+const post   = (path, opts) => request('POST',   path, opts);
+const patch  = (path, opts) => request('PATCH',  path, opts);
+const del    = (path, opts) => request('DELETE', path, opts);
+
+// ── Token refresh ─────────────────────────────
+async function refreshAccessToken() {
+  try {
+    const refresh = storage.getRefreshToken();
+    const res = await fetch(`${BASE_URL}/refresh`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${refresh}` },
+    });
+    if (!res.ok) { storage.clearTokens(); return false; }
+    const data = await res.json();
+    localStorage.setItem('access_token', data.access_token);
+    return true;
+  } catch {
+    storage.clearTokens();
+    return false;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// AUTH
+// ═══════════════════════════════════════════════
+const auth = {
+  /** POST /signup */
+  signup(data)  { return post('/signup',  { body: data }); },
+
+  /** POST /login — stores tokens on success */
+  async login(email, password) {
+    const data = await post('/login', { body: { email, password } });
+    storage.setTokens(data.access_token, data.refresh_token);
+    return data;
+  },
+
+  /** POST /logout */
+  async logout() {
+    await post('/logout').catch(() => {});
+    storage.clearTokens();
+  },
+
+  /** POST /refresh */
+  refresh() { return refreshAccessToken(); },
+
+  /** GET /verify-email?token=... */
+  verifyEmail(token) { return get('/verify-email', { params: { token } }); },
+
+  /** POST /forgot-password */
+  forgotPassword(email) { return post('/forgot-password', { body: { email } }); },
+
+  /** POST /reset-password */
+  resetPassword(token, newPassword) { return post('/reset-password', { body: { token, new_password: newPassword } }); },
+};
+
+// ═══════════════════════════════════════════════
+// USERS
+// ═══════════════════════════════════════════════
+const users = {
+  /** GET /users/me */
+  getMe()        { return get('/users/me'); },
+
+  /** PATCH /users/me */
+  updateMe(data) { return patch('/users/me', { body: data }); },
+
+  /** PATCH /users/me/profile */
+  updateProfile(data) { return patch('/users/me/profile', { body: data }); },
+
+  /** DELETE /users/me */
+  deleteMe()     { return del('/users/me'); },
+
+  /** PATCH /users/me/avatar — multipart file upload */
+  uploadAvatar(file) {
+    const form = new FormData();
+    form.append('file', file);
+    return post('/users/me/avatar', { form });
+  },
+
+  /** GET /users?username=&skip=&limit= */
+  search({ username, skip = 0, limit = 20 } = {}) {
+    return get('/users', { params: { username, skip, limit } });
+  },
+
+  /** GET /users/:id */
+  getById(id)           { return get(`/users/${id}`); },
+
+  /** GET /users/by-username/:username */
+  getByUsername(username) { return get(`/users/by-username/${username}`); },
+
+  /** POST /users/:id/follow */
+  follow(id)            { return post(`/users/${id}/follow`); },
+
+  /** DELETE /users/:id/follow */
+  unfollow(id)          { return del(`/users/${id}/follow`); },
+
+  /** POST /follow-requests/:requesterId/accept */
+  acceptFollowRequest(requesterId)  { return post(`/follow-requests/${requesterId}/accept`); },
+
+  /** DELETE /follow-requests/:requesterId/reject */
+  rejectFollowRequest(requesterId)  { return del(`/follow-requests/${requesterId}/reject`); },
+
+  /** DELETE /users/:followerId/remove-follower */
+  removeFollower(followerId)        { return del(`/users/${followerId}/remove-follower`); },
+
+  /** GET /users/:id/followers */
+  getFollowers(id, { skip = 0, limit = 20 } = {}) {
+    return get(`/users/${id}/followers`, { params: { skip, limit } });
+  },
+
+  /** GET /users/:id/following */
+  getFollowing(id, { skip = 0, limit = 20 } = {}) {
+    return get(`/users/${id}/following`, { params: { skip, limit } });
+  },
+
+  /** GET /users/me/follow-requests */
+  getFollowRequests() { return get('/users/me/follow-requests'); },
+
+  /** POST /users/:id/block */
+  block(id)   { return post(`/users/${id}/block`); },
+
+  /** DELETE /users/:id/block */
+  unblock(id) { return del(`/users/${id}/block`); },
+
+  /** GET /users/me/blocked */
+  getBlocked() { return get('/users/me/blocked'); },
+};
+
+// ═══════════════════════════════════════════════
+// POSTS
+// ═══════════════════════════════════════════════
+const posts = {
+  /** GET /feed */
+  getExploreFeed({ sortBy = 'latest', keyword, skip = 0, limit = 20 } = {}) {
+    return get('/feed', { params: { sort_by: sortBy, keyword, skip, limit } });
+  },
+
+  /** GET /feed/following */
+  getFollowingFeed({ skip = 0, limit = 20 } = {}) {
+    return get('/feed/following', { params: { skip, limit } });
+  },
+
+  /**
+   * POST /posts — multipart
+   * @param {{ caption?, locationName?, hideLikeCount?, disableComments?, taggedUserIds? }} meta
+   * @param {File[]} files
+   */
+  create(meta, files) {
+    const form = new FormData();
+    if (meta.caption)         form.append('caption', meta.caption);
+    if (meta.locationName)    form.append('location_name', meta.locationName);
+    if (meta.hideLikeCount)   form.append('hide_like_count', 'true');
+    if (meta.disableComments) form.append('disable_comments', 'true');
+    if (meta.taggedUserIds?.length) form.append('tagged_user_ids', meta.taggedUserIds.join(','));
+    files.forEach(f => form.append('files', f));
+    return post('/posts', { form });
+  },
+
+  /** GET /posts/:id */
+  getById(id) { return get(`/posts/${id}`); },
+
+  /** PATCH /posts/:id */
+  update(id, data) { return patch(`/posts/${id}`, { body: data }); },
+
+  /** POST /posts/:id/archive */
+  toggleArchive(id) { return post(`/posts/${id}/archive`); },
+
+  /** DELETE /posts/:id */
+  delete(id) { return del(`/posts/${id}`); },
+
+  /** GET /users/:userId/posts */
+  getUserPosts(userId, { sortBy = 'latest', skip = 0, limit = 20 } = {}) {
+    return get(`/users/${userId}/posts`, { params: { sort_by: sortBy, skip, limit } });
+  },
+
+  /** GET /users/me/posts/archived */
+  getArchived() { return get('/users/me/posts/archived'); },
+
+  // ── Likes ─────────────────────────────────
+  like(id)   { return post(`/posts/${id}/like`); },
+  unlike(id) { return del(`/posts/${id}/like`); },
+  getLikers(id) { return get(`/posts/${id}/likes`); },
+
+  // ── Comments ──────────────────────────────
+  getComments(id, { skip = 0, limit = 20, includeReplies = false } = {}) {
+    return get(`/posts/${id}/comments`, { params: { skip, limit, include_replies: includeReplies } });
+  },
+  getReplies(commentId, { skip = 0, limit = 20 } = {}) {
+    return get(`/comments/${commentId}/replies`, { params: { skip, limit } });
+  },
+  addComment(postId, text, parentId = null) {
+    return post(`/posts/${postId}/comments`, { body: { content: text, parent_id: parentId } });
+  },
+  updateComment(commentId, text) {
+    return patch(`/comments/${commentId}`, { body: { content: text } });
+  },
+  deleteComment(commentId) {
+    return del(`/comments/${commentId}`);
+  },
+  likeComment(id)   { return post(`/comments/${id}/like`); },
+  unlikeComment(id) { return del(`/comments/${id}/like`); },
+
+  // ── Saves / Collections ────────────────────
+  save(postId, collectionId = null) {
+    return post(`/posts/${postId}/save`, { params: { collection_id: collectionId } });
+  },
+  unsave(postId) { return del(`/posts/${postId}/save`); },
+  getSaved({ skip = 0, limit = 20 } = {}) {
+    return get('/users/me/saved', { params: { skip, limit } });
+  },
+  createCollection(name)  { return post('/collections', { body: { name } }); },
+  getCollections()        { return get('/collections'); },
+
+  // ── Interaction stats ──────────────────────
+  getMyInteractions() { return get('/me/posts/interactions'); },
+  getLikedPosts()     { return get('/me/liked-posts'); },
+  getCommentedPosts() { return get('/me/commented-posts'); },
+};
+
+// ═══════════════════════════════════════════════
+// MESSAGES
+// ═══════════════════════════════════════════════
+const messages = {
+  // ── Threads ───────────────────────────────
+  /** GET /threads */
+  getThreads({ skip = 0, limit = 30 } = {}) {
+    return get('/threads', { params: { skip, limit } });
+  },
+
+  /** POST /threads/dm/:targetId */
+  getOrCreateDM(targetId) { return post(`/threads/dm/${targetId}`); },
+
+  /** POST /threads/group */
+  createGroup(data) { return post('/threads/group', { body: data }); },
+
+  /** GET /threads/:id */
+  getThread(id) { return get(`/threads/${id}`); },
+
+  /** PATCH /threads/:id */
+  updateGroup(id, data) { return patch(`/threads/${id}`, { body: data }); },
+
+  /** PATCH /threads/:id/cover — multipart */
+  updateGroupCover(id, file) {
+    const form = new FormData();
+    form.append('file', file);
+    return patch(`/threads/${id}/cover`, { form });
+  },
+
+  // ── Members ───────────────────────────────
+  /** POST /threads/:id/members */
+  addMembers(threadId, memberIds) {
+    return post(`/threads/${threadId}/members`, { body: memberIds });
+  },
+
+  /** DELETE /threads/:id/members/:targetId */
+  removeMember(threadId, targetId) {
+    return del(`/threads/${threadId}/members/${targetId}`);
+  },
+
+  /** POST /threads/:id/leave */
+  leaveThread(id) { return post(`/threads/${id}/leave`); },
+
+  /** POST /threads/:id/members/:targetId/promote */
+  promoteMember(threadId, targetId) {
+    return post(`/threads/${threadId}/members/${targetId}/promote`);
+  },
+
+  // ── Messages ──────────────────────────────
+  /**
+   * GET /threads/:id/messages
+   * @param {{ skip?, limit?, beforeId? }} opts
+   */
+  getMessages(threadId, { skip = 0, limit = 30, beforeId } = {}) {
+    return get(`/threads/${threadId}/messages`, {
+      params: { skip, limit, before_id: beforeId },
+    });
+  },
+
+  /**
+   * POST /threads/:id/messages — multipart (text + optional file)
+   * @param {string} text
+   * @param {File|null} file
+   */
+  sendMessage(threadId, text, file = null) {
+    const form = new FormData();
+    if (text) form.append('body', text);
+    if (file) form.append('file', file);
+    return post(`/threads/${threadId}/messages`, { form });
+  },
+
+  /** DELETE /messages/:id */
+  unsendMessage(messageId) { return del(`/messages/${messageId}`); },
+
+  // ── Reactions ─────────────────────────────
+  /** POST /messages/:id/reaction */
+  addReaction(messageId, emoji) {
+    return post(`/messages/${messageId}/reaction`, { body: { emoji } });
+  },
+
+  /** DELETE /messages/:id/reaction */
+  removeReaction(messageId) {
+    return del(`/messages/${messageId}/reaction`);
+  },
+};
+
+// ── Default export ────────────────────────────
+const api = { auth, users, posts, messages, storage };
+export default api;
+import api from './api.js';
+import { initAuth, getCurrentUser, renderLoginPage, renderSignupPage, renderForgotPage } from './auth.js';
+import { renderFeedPage }     from './feed.js';
+import { renderProfilePage }  from './profile.js';
+import { renderMessagesPage } from './messages.js';
+import { buildAvatar, toast, toastError, formatCount, modal, confirm, relativeTime } from './ui.js';
+
+/**
+ * app.js — Main entry point
+ * Hash-based router, sidebar, mobile nav, app shell.
+ */
+
+
+// ═══════════════════════════════════════════════
+// BOOTSTRAP
+// ═══════════════════════════════════════════════
+async function boot() {
+  const user = await initAuth();
+
+  renderShell();
+  setupRouter();
+
+  if (!user && requiresAuth(window.location.hash)) {
+    window.location.hash = '#login';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+
+// ═══════════════════════════════════════════════
+// SHELL
+// ═══════════════════════════════════════════════
+function renderShell() {
+  document.body.innerHTML = `
+    <!-- MOBILE TOP BAR -->
+    <div class="mobile-topbar" id="mobile-topbar">
+      <div class="sidebar-brand" style="padding:0">
+        <div class="sidebar-brand-icon">S</div>
+        <span class="sidebar-brand-name">Spark</span>
+      </div>
+      <div class="flex gap-2">
+        <button class="btn-icon" id="mobile-search-btn">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- APP SHELL -->
+    <div class="app-shell">
+      <!-- SIDEBAR -->
+      <nav class="sidebar" id="sidebar" style="display:none">
+        <a href="#feed" class="sidebar-brand" style="text-decoration:none">
+          <div class="sidebar-brand-icon">S</div>
+          <span class="sidebar-brand-name">Spark</span>
+        </a>
+
+        <div class="nav-section">
+          <a href="#feed"       class="nav-link" data-route="feed">
+            <span class="nav-icon">🏠</span> Home
+          </a>
+          <a href="#explore"    class="nav-link" data-route="explore">
+            <span class="nav-icon">🔍</span> Explore
+          </a>
+          <a href="#messages"   class="nav-link" data-route="messages">
+            <span class="nav-icon">💬</span> Messages
+            <span class="nav-badge" id="unread-badge" style="display:none">0</span>
+          </a>
+          <a href="#notifications" class="nav-link" data-route="notifications">
+            <span class="nav-icon">🔔</span> Notifications
+          </a>
+
+          <div class="nav-section-label">Create</div>
+          <button class="nav-link" id="new-post-btn" style="width:100%;text-align:left">
+            <span class="nav-icon">➕</span> New post
+          </button>
+
+          <div class="nav-section-label">Me</div>
+          <a href="#profile" class="nav-link" data-route="profile">
+            <span class="nav-icon">👤</span> Profile
+          </a>
+          <a href="#saved"   class="nav-link" data-route="saved">
+            <span class="nav-icon">🔖</span> Saved
+          </a>
+          <a href="#settings" class="nav-link" data-route="settings">
+            <span class="nav-icon">⚙️</span> Settings
+          </a>
+        </div>
+
+        <div class="sidebar-user" id="sidebar-user" style="display:none">
+          <div id="sidebar-avatar-slot"></div>
+          <div class="sidebar-user-info">
+            <div class="sidebar-user-name"  id="sidebar-username">—</div>
+            <div class="sidebar-user-handle" id="sidebar-handle">—</div>
+          </div>
+          <button class="sidebar-user-more" id="logout-btn" title="Logout">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+              <polyline points="16 17 21 12 16 7"/>
+              <line x1="21" y1="12" x2="9" y2="12"/>
+            </svg>
+          </button>
+        </div>
+      </nav>
+
+      <!-- MAIN CONTENT -->
+      <main class="main-content" id="main-content"></main>
+    </div>
+
+    <!-- MOBILE BOTTOM NAV -->
+    <nav class="mobile-bottomnav" id="mobile-bottomnav" style="display:none">
+      <div class="mobile-bottomnav-inner">
+        <a href="#feed" class="mobile-nav-btn" data-route="feed">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          Home
+        </a>
+        <a href="#explore" class="mobile-nav-btn" data-route="explore">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Explore
+        </a>
+        <button class="mobile-nav-btn" id="mobile-new-post">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+          Post
+        </button>
+        <a href="#messages" class="mobile-nav-btn" data-route="messages">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Messages
+        </a>
+        <a href="#profile" class="mobile-nav-btn" data-route="profile">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          Profile
+        </a>
+      </div>
+    </nav>
+
+    <!-- Toast container injected by ui.js -->
+  `;
+
+  document.querySelector('#new-post-btn')?.addEventListener('click', openNewPostModal);
+  document.querySelector('#mobile-new-post')?.addEventListener('click', openNewPostModal);
+  document.querySelector('#logout-btn')?.addEventListener('click', handleLogout);
+}
+
+// ── Sidebar user info ─────────────────────────
+function updateSidebarUser() {
+  const user = getCurrentUser();
+  const sidebarEl = document.querySelector('#sidebar');
+  const sidebarUser = document.querySelector('#sidebar-user');
+  const mobileNav  = document.querySelector('#mobile-bottomnav');
+
+  if (user) {
+    sidebarEl.style.display = '';
+    sidebarUser.style.display = 'flex';
+    mobileNav.style.display = 'block';
+
+    document.querySelector('#sidebar-username').textContent = user.profile?.full_name || user.full_name || user.username;
+    document.querySelector('#sidebar-handle').textContent   = '@' + user.username;
+
+    const slot = document.querySelector('#sidebar-avatar-slot');
+    slot.innerHTML = '';
+    slot.appendChild(buildAvatar({ src: user.profile?.avatar_path || user.avatar_url, username: user.username, size: 'xs' }));
+  } else {
+    sidebarEl.style.display = 'none';
+    mobileNav.style.display = 'none';
+  }
+}
+
+// ═══════════════════════════════════════════════
+// ROUTER
+// ═══════════════════════════════════════════════
+const AUTH_ROUTES  = ['login', 'signup', 'forgot'];
+const GUEST_ROUTES = new Set(['login', 'signup', 'forgot', 'explore', 'post']);
+
+function requiresAuth(hash) {
+  const route = parseHash(hash).route;
+  return !GUEST_ROUTES.has(route) && !AUTH_ROUTES.includes(route);
+}
+
+function parseHash(hash = '') {
+  const clean = hash.replace(/^#/, '');
+  const [route, ...params] = clean.split('/');
+  return { route: route || 'feed', params };
+}
+
+function setupRouter() {
+  const navigate = () => {
+    const { route, params } = parseHash(window.location.hash);
+    const user = getCurrentUser();
+
+    updateSidebarUser();
+    setActiveNavLink(route);
+
+    const main = document.querySelector('#main-content');
+    main.innerHTML = '';
+
+    // Redirect to login if auth required
+    if (requiresAuth('#' + route) && !user) {
+      window.location.hash = '#login';
+      return;
+    }
+    // Redirect away from auth pages if logged in
+    if (AUTH_ROUTES.includes(route) && user) {
+      window.location.hash = '#feed';
+      return;
+    }
+
+    switch (route) {
+      case 'login':    renderLoginPage(main);    break;
+      case 'signup':   renderSignupPage(main);   break;
+      case 'forgot':   renderForgotPage(main);   break;
+      case 'feed':     renderFeedPage(main);      break;
+      case 'explore':  renderExplorePage(main);    break;
+      case 'messages': renderMessagesPage(main, params[0]); break;
+      case 'profile':
+        renderProfilePage(main, params[0] || (user ? user.username : ''));
+        break;
+      case 'saved':    renderSavedPage(main);    break;
+      case 'settings': renderSettingsPage(main); break;
+      case 'post':     renderPostDetailPage(main, params[0]); break;
+      default:
+        main.innerHTML = `<div class="empty-state" style="padding:var(--s8)"><p>Page not found.</p><a href="#feed" class="btn btn-ghost btn-sm" style="margin-top:var(--s3)">Go home</a></div>`;
+    }
+  };
+
+  window.addEventListener('hashchange', navigate);
+  navigate();
+}
+
+function setActiveNavLink(route) {
+  document.querySelectorAll('[data-route]').forEach(el => {
+    el.classList.toggle('active', el.dataset.route === route);
+  });
+}
+
+// ═══════════════════════════════════════════════
+// NEW POST MODAL
+// ═══════════════════════════════════════════════
+
+function openNewPostModal() {
+  const m = modal({
+    title: 'New post',
+    content: `
+      <div class="flex-col gap-4">
+        <div id="post-drop-zone" style="
+          border: 2px dashed var(--border); border-radius: var(--r-md);
+          padding: var(--s7); text-align: center; cursor: pointer;
+          transition: border-color var(--t-fast), background var(--t-fast);
+        ">
+          <input type="file" id="post-files" accept="image/*,video/*" multiple style="display:none" />
+          <div id="post-drop-content">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="margin:0 auto;opacity:.4">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
+            </svg>
+            <p style="margin-top:var(--s2);color:var(--text-muted);font-size:.88rem">Drag & drop or click to select</p>
+            <p style="font-size:.78rem;color:var(--text-muted);margin-top:4px">Up to 10 files · Images or videos</p>
+          </div>
+          <div id="post-previews" style="display:none;flex-wrap:wrap;gap:var(--s2);justify-content:center"></div>
+        </div>
+
+        <div class="input-group">
+          <label>Caption</label>
+          <textarea id="post-caption" class="input" rows="3" placeholder="Write a caption…" maxlength="2200" style="resize:vertical"></textarea>
+        </div>
+
+        <div class="input-group">
+          <label>Location</label>
+          <input id="post-location" type="text" class="input" placeholder="Add location" />
+        </div>
+
+        <div class="flex gap-4" style="flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:var(--s2);font-size:.85rem;cursor:pointer">
+            <input type="checkbox" id="post-hide-likes" /> Hide like count
+          </label>
+          <label style="display:flex;align-items:center;gap:var(--s2);font-size:.85rem;cursor:pointer">
+            <input type="checkbox" id="post-disable-comments" /> Disable comments
+          </label>
+        </div>
+      </div>
+    `,
+    footer: `
+      <div class="flex gap-3" style="justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" id="post-cancel">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="post-submit" disabled>Share post</button>
+      </div>
+    `,
+  });
+
+  m.el.querySelector('#post-cancel').addEventListener('click', m.close);
+
+  const dropZone   = m.el.querySelector('#post-drop-zone');
+  const fileInput  = m.el.querySelector('#post-files');
+  const previewsEl = m.el.querySelector('#post-previews');
+  const dropContent = m.el.querySelector('#post-drop-content');
+  const submitBtn  = m.el.querySelector('#post-submit');
+  let selectedFiles = [];
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.style.borderColor = 'var(--accent)'; dropZone.style.background = 'var(--accent-dim)'; });
+  dropZone.addEventListener('dragleave', () => { dropZone.style.borderColor = ''; dropZone.style.background = ''; });
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault(); dropZone.style.borderColor = ''; dropZone.style.background = '';
+    handleFiles([...e.dataTransfer.files]);
+  });
+  fileInput.addEventListener('change', () => handleFiles([...fileInput.files]));
+
+  function handleFiles(files) {
+    selectedFiles = files.slice(0, 10);
+    previewsEl.innerHTML = '';
+    if (selectedFiles.length === 0) return;
+
+    dropContent.style.display = 'none';
+    previewsEl.style.display  = 'flex';
+    selectedFiles.forEach((f, i) => {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'position:relative;width:80px;height:80px;border-radius:var(--r-sm);overflow:hidden;background:var(--bg-raised)';
+      if (f.type.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.style.cssText = 'width:100%;height:100%;object-fit:cover';
+        img.src = URL.createObjectURL(f);
+        wrap.appendChild(img);
+      } else {
+        wrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:.75rem;text-align:center;padding:4px">▶<br/>${f.name.slice(0,12)}</div>`;
+      }
+      previewsEl.appendChild(wrap);
+    });
+    submitBtn.disabled = false;
+  }
+
+  submitBtn.addEventListener('click', async () => {
+    if (selectedFiles.length === 0) return;
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<div class="spinner"></div>';
+    try {
+      await api.posts.create({
+        caption:         m.el.querySelector('#post-caption').value.trim(),
+        locationName:    m.el.querySelector('#post-location').value.trim(),
+        hideLikeCount:   m.el.querySelector('#post-hide-likes').checked,
+        disableComments: m.el.querySelector('#post-disable-comments').checked,
+      }, selectedFiles);
+      m.close();
+      toast('Post shared!', 'success');
+      if (window.location.hash === '#feed' || window.location.hash === '') {
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      } else {
+        window.location.hash = '#feed';
+      }
+    } catch (err) {
+      toastError(err.message || 'Failed to create post');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Share post';
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════
+// SAVED PAGE
+// ═══════════════════════════════════════════════
+async function renderSavedPage(container) {
+  container.innerHTML = `
+    <div class="page-header"><h1 class="page-title">Saved</h1></div>
+    <div style="padding:var(--s4)">
+      <div id="saved-grid" class="post-grid" style="max-width:900px;margin:0 auto;padding:2px"></div>
+      <div id="saved-loader" style="text-align:center;padding:var(--s6)"><div class="spinner" style="margin:0 auto"></div></div>
+    </div>
+  `;
+
+  try {
+    const posts = await api.posts.getSaved({ limit: 30 });
+    const grid   = container.querySelector('#saved-grid');
+    container.querySelector('#saved-loader').style.display = 'none';
+
+    if (posts.length === 0) {
+      grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;padding:var(--s8)"><p>Nothing saved yet.</p></div>';
+    } else {
+      const { buildGridItem } = await import('./profile.js').catch(() => ({ buildGridItem: null }));
+      posts.forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'post-grid-item';
+        const img = document.createElement('img');
+        img.src = p.media_items?.[0]?.url || '';
+        img.loading = 'lazy'; img.alt = '';
+        item.appendChild(img);
+        item.addEventListener('click', () => { window.location.hash = `#post/${p.id}`; });
+        grid.appendChild(item);
+      });
+    }
+  } catch (err) { console.error('Saved error:', err); toastError('Failed to load saved posts'); }
+}
+
+// ═══════════════════════════════════════════════
+// EXPLORE PAGE
+// ═══════════════════════════════════════════════
+async function renderExplorePage(container) {
+  container.innerHTML = `
+    <div class="page-header"><h1 class="page-title">Explore</h1></div>
+    <div style="padding:var(--s4) var(--s5) 0">
+      <div style="position:relative;max-width:480px">
+        <input id="explore-search" type="text" class="input" placeholder="Search people by username…"
+          style="padding-left:40px" />
+        <svg style="position:absolute;left:12px;top:50%;transform:translateY(-50%);opacity:.4;pointer-events:none"
+          width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+      </div>
+      <div id="search-results" style="margin-top:var(--s3);max-width:480px"></div>
+    </div>
+
+    <div style="padding:var(--s4) var(--s5)">
+      <p style="font-size:.78rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);margin-bottom:var(--s3)">Latest posts</p>
+      <div id="explore-grid" class="post-grid" style="max-width:900px"></div>
+      <div id="explore-loader" style="text-align:center;padding:var(--s6)">
+        <div class="spinner" style="margin:0 auto"></div>
+      </div>
+    </div>
+  `;
+
+  // People search
+  const searchEl   = container.querySelector('#explore-search');
+  const resultsEl  = container.querySelector('#search-results');
+  let searchTimeout;
+
+  searchEl.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    const q = searchEl.value.trim();
+    if (!q) { resultsEl.innerHTML = ''; return; }
+    searchTimeout = setTimeout(async () => {
+      resultsEl.innerHTML = '<div style="padding:var(--s3);color:var(--text-muted);font-size:.85rem">Searching…</div>';
+      try {
+        const users = await api.users.search({ username: q, limit: 8 });
+        if (users.length === 0) {
+          resultsEl.innerHTML = '<div style="padding:var(--s3);color:var(--text-muted);font-size:.85rem">No users found.</div>';
+          return;
+        }
+        resultsEl.innerHTML = '';
+        const list = document.createElement('div');
+        list.className = 'card';
+        list.style.overflow = 'hidden';
+        users.forEach(u => {
+          const row = document.createElement('a');
+          row.href = `#profile/${u.username}`;
+          row.style.cssText = 'display:flex;align-items:center;gap:var(--s3);padding:var(--s3) var(--s4);transition:background var(--t-fast);text-decoration:none';
+          row.onmouseenter = () => row.style.background = 'var(--bg-raised)';
+          row.onmouseleave = () => row.style.background = '';
+          const av = buildAvatar({ src: u.profile?.avatar_path || u.avatar_url, username: u.username, size: 'sm' });
+          row.appendChild(av);
+          row.innerHTML += `
+            <div style="flex:1;min-width:0">
+              <div style="font-size:.88rem;font-weight:600">${escHtml(u.username)}</div>
+              ${(u.profile?.full_name||u.full_name) ? `<div style="font-size:.78rem;color:var(--text-muted)">${escHtml(u.profile?.full_name||u.full_name||'')}</div>` : ''}
+            </div>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.4;flex-shrink:0">
+              <path d="M9 18l6-6-6-6"/>
+            </svg>
+          `;
+          row.prepend(av);
+          list.appendChild(row);
+        });
+        resultsEl.appendChild(list);
+      } catch { console.error('Search error:', err); resultsEl.innerHTML = '<div style="padding:var(--s3);color:var(--danger);font-size:.85rem">Search failed.</div>'; }
+    }, 350);
+  });
+
+  // Explore grid (latest posts)
+  try {
+    const posts = await api.posts.getExploreFeed({ limit: 30 });
+    const grid   = container.querySelector('#explore-grid');
+    container.querySelector('#explore-loader').style.display = 'none';
+    if (posts.length === 0) {
+      grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;padding:var(--s8)"><p>No posts yet.</p></div>';
+    } else {
+      posts.forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'post-grid-item';
+        const img = document.createElement('img');
+        img.src = p.media_items?.[0]?.url || '';
+        img.alt = ''; img.loading = 'lazy';
+        const overlay = document.createElement('div');
+        overlay.className = 'post-grid-overlay';
+        overlay.innerHTML = `
+          <div class="grid-stat"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>${p.like_count||0}</div>
+          <div class="grid-stat"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>${p.comment_count||0}</div>
+        `;
+        item.appendChild(img);
+        item.appendChild(overlay);
+        item.addEventListener('click', () => { window.location.hash = `#post/${p.id}`; });
+        grid.appendChild(item);
+      });
+    }
+  } catch {
+    console.error('Explore posts error:', err); container.querySelector('#explore-loader').innerHTML = '<p style="color:var(--text-muted);font-size:.85rem">Could not load posts.</p>';
+  }
+}
+
+// ═══════════════════════════════════════════════
+// SETTINGS PAGE
+// ═══════════════════════════════════════════════
+async function renderSettingsPage(container) {
+  const user = getCurrentUser();
+  container.innerHTML = `
+    <div class="page-header"><h1 class="page-title">Settings</h1></div>
+    <div style="padding:var(--s5) var(--s6);max-width:600px;width:100%">
+
+      <!-- Avatar section -->
+      <div class="card" style="padding:var(--s5);margin-bottom:var(--s4)">
+        <div style="display:flex;align-items:center;gap:var(--s4)">
+          <div id="settings-avatar-slot"></div>
+          <div>
+            <div style="font-size:.95rem;font-weight:600">${escHtml(user?.username || '')}</div>
+            <input type="file" id="avatar-file" accept="image/*" style="display:none" />
+            <button class="btn btn-ghost btn-sm" id="change-avatar-btn" style="margin-top:var(--s2)">Change photo</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Edit profile form -->
+      <div class="card" style="padding:var(--s5);margin-bottom:var(--s4)">
+        <h2 style="font-family:var(--font-serif);font-size:1.1rem;margin-bottom:var(--s5)">Edit profile</h2>
+        <form id="settings-form" class="flex-col gap-4">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)">
+            <div class="input-group">
+              <label>First name</label>
+              <input name="first_name" type="text" class="input" value="${escHtml(user?.profile?.full_name?.split(' ')[0] || user?.first_name || '')}" />
+            </div>
+            <div class="input-group">
+              <label>Last name</label>
+              <input name="last_name" type="text" class="input" value="${escHtml(user?.profile?.full_name?.split(' ').slice(1).join(' ') || user?.last_name || '')}" />
+            </div>
+          </div>
+          <div class="input-group">
+            <label>Username</label>
+            <input name="username" type="text" class="input" value="${escHtml(user?.username || '')}" />
+          </div>
+          <div class="input-group">
+            <label>Bio</label>
+            <textarea name="bio" class="input" rows="3" maxlength="150" style="resize:vertical">${escHtml(user?.profile?.bio || user?.bio || '')}</textarea>
+            <span style="font-size:.72rem;color:var(--text-muted);text-align:right" id="bio-count">${(user?.bio||'').length}/150</span>
+          </div>
+          <div class="input-group">
+            <label>Website</label>
+            <input name="website" type="url" class="input" value="${escHtml(user?.profile?.website || user?.website || '')}" placeholder="https://..." />
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:var(--s3) var(--s4);background:var(--bg-raised);border-radius:var(--r-md)">
+            <div>
+              <div style="font-size:.88rem;font-weight:500">Private account</div>
+              <div style="font-size:.78rem;color:var(--text-muted)">Only approved followers can see your posts</div>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" name="is_private" ${user?.is_private ? 'checked' : ''} id="private-toggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div style="display:flex;justify-content:flex-end">
+            <button type="submit" class="btn btn-primary" id="save-settings-btn">Save changes</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Danger zone -->
+      <div class="card" style="padding:var(--s5);border-color:rgba(224,92,92,0.2)">
+        <h3 style="font-size:.9rem;font-weight:600;color:var(--danger);margin-bottom:var(--s2)">Danger zone</h3>
+        <p style="font-size:.82rem;color:var(--text-muted);margin-bottom:var(--s4)">Once deleted, your account and all data cannot be recovered.</p>
+        <button class="btn btn-danger btn-sm" id="delete-account-btn">Delete my account</button>
+      </div>
+    </div>
+  `;
+
+  // Toggle switch styles
+  injectSettingsStyles();
+
+  // Bio character counter
+  const bioEl    = container.querySelector('[name="bio"]');
+  const bioCount = container.querySelector('#bio-count');
+  bioEl?.addEventListener('input', () => { bioCount.textContent = bioEl.value.length + '/150'; });
+
+  // Avatar
+  const slot = container.querySelector('#settings-avatar-slot');
+  slot.appendChild(buildAvatar({ src: user?.profile?.avatar_path || user?.avatar_url, username: user?.username, size: 'lg' }));
+  container.querySelector('#change-avatar-btn').addEventListener('click', () => container.querySelector('#avatar-file').click());
+  container.querySelector('#avatar-file').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      await api.users.uploadAvatar(file);
+      toast('Avatar updated!', 'success');
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    } catch { toastError('Failed to upload'); }
+  });
+
+  // Save profile
+  container.querySelector('#settings-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = container.querySelector('#save-settings-btn');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    const fd = new FormData(e.target);
+    const data = {};
+    fd.forEach((v, k) => { data[k] = v; });
+    data.is_private = fd.has('is_private');
+    try {
+      const accountFields = {};
+      const profileFields = {};
+      ['username', 'is_private'].forEach(k => { if (data[k] !== undefined) accountFields[k] = data[k]; });
+      ['bio', 'website', 'full_name'].forEach(k => { if (data[k] !== undefined) profileFields[k] = data[k]; });
+      // build full_name from first+last
+      const fn = (data.first_name || '').trim();
+      const ln = (data.last_name  || '').trim();
+      if (fn || ln) profileFields.full_name = [fn, ln].filter(Boolean).join(' ');
+      if (Object.keys(accountFields).length) await api.users.updateMe(accountFields);
+      if (Object.keys(profileFields).length)  await api.users.updateProfile(profileFields);
+      toast('Profile updated!', 'success');
+    } catch (err) { toastError(err.message || 'Failed to save'); }
+    finally { btn.disabled = false; btn.textContent = 'Save changes'; }
+  });
+
+  // Delete account
+  container.querySelector('#delete-account-btn').addEventListener('click', async () => {
+    const ok = await confirm({ title: 'Delete account?', message: 'This is permanent and cannot be undone.', confirmLabel: 'Delete', danger: true });
+    if (!ok) return;
+    try {
+      await api.users.deleteMe();
+      api.storage.clearTokens();
+      window.location.hash = '#login';
+    } catch { toastError('Failed to delete account'); }
+  });
+}
+
+// ═══════════════════════════════════════════════
+// POST DETAIL PAGE
+// ═══════════════════════════════════════════════
+async function renderPostDetailPage(container, postId) {
+  container.innerHTML = `
+    <div class="page-header">
+      <button class="btn-icon" onclick="history.back()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <path d="M19 12H5M12 19l-7-7 7-7"/>
+        </svg>
+      </button>
+      <h1 class="page-title">Post</h1>
+    </div>
+    <div class="page-body">
+      <div id="post-detail-slot"></div>
+      <div id="comments-section" style="margin-top:var(--s4)"></div>
+    </div>
+  `;
+
+  try {
+    const { buildPostCard } = await import('./feed.js');
+    const post = await api.posts.getById(postId);
+    container.querySelector('#post-detail-slot').appendChild(buildPostCard(post));
+
+    // Full comments
+    await loadFullComments(container, postId);
+  } catch {
+    container.querySelector('#post-detail-slot').innerHTML = '<div class="empty-state"><p>Post not found.</p></div>';
+  }
+}
+
+async function loadFullComments(container, postId) {
+  const section = container.querySelector('#comments-section');
+  section.innerHTML = `<div style="padding:var(--s3);font-weight:600;font-size:.88rem">Comments</div>`;
+
+  try {
+    const comments = await api.posts.getComments(postId, { limit: 50, includeReplies: true });
+    if (comments.length === 0) {
+      section.innerHTML += '<div class="empty-state" style="padding:var(--s5)"><p style="color:var(--text-muted)">No comments yet.</p></div>';
+      return;
+    }
+    comments.forEach(c => section.appendChild(buildCommentItem(c, postId)));
+  } catch { /* silent */ }
+}
+
+function buildCommentItem(comment, postId) {
+  const item = document.createElement('div');
+  item.className = 'comment-item';
+  const avatar = buildAvatar({ src: comment.author_avatar, username: comment.author_username, size: 'xs' });
+  item.appendChild(avatar);
+  item.innerHTML += `
+    <div class="comment-body">
+      <span class="comment-author">${escHtml(comment.author_username || '')}</span>
+      <div class="comment-text">${escHtml(comment.content || '')}</div>
+      <div class="comment-actions">
+        <span class="comment-action" style="color:var(--text-muted);font-size:.75rem">${relativeTime(comment.created_at)}</span>
+        <button class="comment-action like-comment" data-comment-id="${comment.id}" data-liked="${comment.is_liked || false}">
+          ${comment.is_liked ? '♥' : '♡'} ${comment.like_count || 0}
+        </button>
+        <button class="comment-action reply-btn" data-comment-id="${comment.id}">Reply</button>
+      </div>
+      ${comment.replies?.length ? `<div class="comment-replies" id="replies-${comment.id}"></div>` : ''}
+    </div>
+  `;
+  item.prepend(avatar);
+
+  item.querySelector('.like-comment')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const isLiked = btn.dataset.liked === 'true';
+    try {
+      if (isLiked) await api.posts.unlikeComment(comment.id);
+      else         await api.posts.likeComment(comment.id);
+      btn.dataset.liked = String(!isLiked);
+      btn.classList.toggle('liked', !isLiked);
+    } catch { /* silent */ }
+  });
+
+  // Replies
+  const repliesEl = item.querySelector(`#replies-${comment.id}`);
+  if (repliesEl && comment.replies) {
+    comment.replies.forEach(r => {
+      const reply = document.createElement('div');
+      reply.className = 'comment-item';
+      reply.innerHTML = `<div class="comment-body"><span class="comment-author">${escHtml(r.author_username || '')}</span><div class="comment-text">${escHtml(r.content || '')}</div></div>`;
+      repliesEl.appendChild(reply);
+    });
+  }
+
+  return item;
+}
+
+// ── Logout ────────────────────────────────────
+async function handleLogout() {
+  await api.auth.logout();
+  window.location.hash = '#login';
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
+
+// ── Helper ────────────────────────────────────
+function escHtml(str = '') {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Settings page styles (toggle switch) ──────
+function injectSettingsStyles() {
+  if (document.getElementById('settings-styles')) return;
+  const s = document.createElement('style');
+  s.id = 'settings-styles';
+  s.textContent = `
+    .toggle-switch { position:relative; display:inline-block; width:44px; height:24px; flex-shrink:0; cursor:pointer; }
+    .toggle-switch input { opacity:0; width:0; height:0; }
+    .toggle-slider {
+      position:absolute; inset:0;
+      background:var(--bg-raised); border:1px solid var(--border);
+      border-radius:var(--r-full); transition:all var(--t-fast);
+    }
+    .toggle-slider::before {
+      content:''; position:absolute;
+      width:18px; height:18px; left:2px; top:2px;
+      background:var(--text-muted); border-radius:50%;
+      transition:all var(--t-fast);
+    }
+    .toggle-switch input:checked + .toggle-slider { background:var(--accent); border-color:var(--accent); }
+    .toggle-switch input:checked + .toggle-slider::before { transform:translateX(20px); background:#1a1400; }
+  `;
+  document.head.appendChild(s);
+}
+/**
+ * auth.js — Auth state manager
+ * Handles login/signup UI, token persistence, and current-user state.
+ */
+
+import api from './api.js';
+import { toast, toastError, setButtonLoading, setFieldError } from './ui.js';
+
+// ── Current user state ────────────────────────
+let _currentUser = null;
+
+export function getCurrentUser() { return _currentUser; }
+export function setCurrentUser(u) { _currentUser = u; }
+export function isLoggedIn() { return !!api.storage.getToken(); }
+
+/**
+ * Boot: fetch /users/me if a token exists.
+ * Call once on app init.
+ */
+export async function initAuth() {
+  if (!api.storage.getToken()) return null;
+  try {
+    _currentUser = await api.users.getMe();
+    return _currentUser;
+  } catch {
+    api.storage.clearTokens();
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// LOGIN PAGE
+// ═══════════════════════════════════════════════
+export function renderLoginPage(container) {
+  container.innerHTML = `
+    <div class="auth-shell">
+      <div class="auth-card card">
+        <div class="auth-brand">
+          <div class="auth-brand-icon">S</div>
+          <span class="auth-brand-name">Spark</span>
+        </div>
+
+        <h1 class="auth-heading">Welcome back</h1>
+        <p class="auth-sub">Sign in to your account</p>
+
+        <form id="login-form" novalidate>
+          <div class="flex-col gap-3">
+            <div class="input-group">
+              <label for="login-email">Email</label>
+              <input id="login-email" name="email" type="email" class="input" placeholder="you@example.com" autocomplete="email" required />
+            </div>
+            <div class="input-group">
+              <label for="login-password">Password</label>
+              <div class="input-password-wrap">
+                <input id="login-password" name="password" type="password" class="input" placeholder="••••••••" autocomplete="current-password" required />
+                <button type="button" class="password-toggle" aria-label="Toggle password">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="auth-forgot">
+            <a href="#forgot" class="auth-link">Forgot password?</a>
+          </div>
+
+          <button type="submit" id="login-btn" class="btn btn-primary" style="width:100%;margin-top:var(--s5)">
+            Sign in
+          </button>
+        </form>
+
+        <div class="auth-divider"><span>or</span></div>
+
+        <p class="auth-switch">
+          Don't have an account? <a href="#signup" class="auth-link">Sign up</a>
+        </p>
+      </div>
+    </div>
+  `;
+
+  injectAuthStyles();
+  wireLoginForm(container);
+}
+
+function wireLoginForm(container) {
+  const form     = container.querySelector('#login-form');
+  const btn      = container.querySelector('#login-btn');
+  const emailEl  = container.querySelector('#login-email');
+  const passEl   = container.querySelector('#login-password');
+  const toggleEl = container.querySelector('.password-toggle');
+
+  // Password visibility toggle
+  toggleEl?.addEventListener('click', () => {
+    passEl.type = passEl.type === 'password' ? 'text' : 'password';
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    setFieldError(emailEl, '');
+    setFieldError(passEl, '');
+
+    const email = emailEl.value.trim();
+    const pass  = passEl.value;
+    if (!email) { setFieldError(emailEl, 'Email is required'); return; }
+    if (!pass)  { setFieldError(passEl,  'Password is required'); return; }
+
+    setButtonLoading(btn, true);
+    try {
+      const data = await api.auth.login(email, pass);
+      _currentUser = data.user;
+      toast('Welcome back!', 'success');
+      window.location.hash = '#feed';
+    } catch (err) {
+      toastError(err.message || 'Login failed');
+    } finally {
+      setButtonLoading(btn, false);
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════
+// SIGNUP PAGE
+// ═══════════════════════════════════════════════
+export function renderSignupPage(container) {
+  container.innerHTML = `
+    <div class="auth-shell">
+      <div class="auth-card card">
+        <div class="auth-brand">
+          <div class="auth-brand-icon">S</div>
+          <span class="auth-brand-name">Spark</span>
+        </div>
+
+        <h1 class="auth-heading">Create account</h1>
+        <p class="auth-sub">Join the community today</p>
+
+        <form id="signup-form" novalidate>
+          <div class="flex-col gap-3">
+            <div class="flex gap-3">
+              <div class="input-group" style="flex:1">
+                <label for="su-fname">First name</label>
+                <input id="su-fname" name="first_name" type="text" class="input" placeholder="Jane" required />
+              </div>
+              <div class="input-group" style="flex:1">
+                <label for="su-lname">Last name</label>
+                <input id="su-lname" name="last_name" type="text" class="input" placeholder="Doe" />
+              </div>
+            </div>
+            <div class="input-group">
+              <label for="su-username">Username</label>
+              <input id="su-username" name="username" type="text" class="input" placeholder="janedoe" autocomplete="username" required />
+            </div>
+            <div class="input-group">
+              <label for="su-email">Email</label>
+              <input id="su-email" name="email" type="email" class="input" placeholder="jane@example.com" autocomplete="email" required />
+            </div>
+            <div class="input-group">
+              <label for="su-password">Password</label>
+              <input id="su-password" name="password" type="password" class="input" placeholder="At least 8 characters" autocomplete="new-password" required />
+            </div>
+          </div>
+
+          <button type="submit" id="signup-btn" class="btn btn-primary" style="width:100%;margin-top:var(--s5)">
+            Create account
+          </button>
+        </form>
+
+        <p class="auth-terms">
+          By signing up you agree to our <a href="#terms" class="auth-link">Terms</a> and <a href="#privacy" class="auth-link">Privacy Policy</a>.
+        </p>
+
+        <p class="auth-switch">
+          Already have an account? <a href="#login" class="auth-link">Sign in</a>
+        </p>
+      </div>
+    </div>
+  `;
+
+  injectAuthStyles();
+  wireSignupForm(container);
+}
+
+function wireSignupForm(container) {
+  const form = container.querySelector('#signup-form');
+  const btn  = container.querySelector('#signup-btn');
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const emailEl = form.querySelector('#su-email');
+    const passEl  = form.querySelector('#su-password');
+    const userEl  = form.querySelector('#su-username');
+
+    setFieldError(emailEl, '');
+    setFieldError(passEl, '');
+    setFieldError(userEl, '');
+
+    const payload = {
+      first_name: form.querySelector('#su-fname').value.trim(),
+      last_name:  form.querySelector('#su-lname').value.trim(),
+      username:   userEl.value.trim(),
+      email:      emailEl.value.trim(),
+      password:   passEl.value,
+    };
+
+    if (!payload.username) { setFieldError(userEl,  'Username is required'); return; }
+    if (!payload.email)    { setFieldError(emailEl, 'Email is required'); return; }
+    if (payload.password.length < 8) { setFieldError(passEl, 'Must be at least 8 characters'); return; }
+
+    setButtonLoading(btn, true);
+    try {
+      await api.auth.signup(payload);
+      toast('Account created! Check your email to verify.', 'success', 5000);
+      window.location.hash = '#login';
+    } catch (err) {
+      toastError(err.message || 'Signup failed');
+    } finally {
+      setButtonLoading(btn, false);
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════
+// FORGOT PASSWORD PAGE
+// ═══════════════════════════════════════════════
+export function renderForgotPage(container) {
+  container.innerHTML = `
+    <div class="auth-shell">
+      <div class="auth-card card">
+        <a href="#login" class="auth-back">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+          Back to login
+        </a>
+        <h1 class="auth-heading" style="margin-top:var(--s4)">Reset password</h1>
+        <p class="auth-sub">We'll send you a reset link.</p>
+
+        <form id="forgot-form" novalidate>
+          <div class="input-group" style="margin-top:var(--s4)">
+            <label for="forgot-email">Email</label>
+            <input id="forgot-email" type="email" class="input" placeholder="you@example.com" required />
+          </div>
+          <button type="submit" id="forgot-btn" class="btn btn-primary" style="width:100%;margin-top:var(--s5)">
+            Send reset link
+          </button>
+        </form>
+      </div>
+    </div>
+  `;
+
+  injectAuthStyles();
+  const form    = container.querySelector('#forgot-form');
+  const btn     = container.querySelector('#forgot-btn');
+  const emailEl = container.querySelector('#forgot-email');
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = emailEl.value.trim();
+    if (!email) { setFieldError(emailEl, 'Email is required'); return; }
+    setButtonLoading(btn, true);
+    try {
+      await api.auth.forgotPassword(email);
+      toast('If that email exists, a reset link has been sent.', 'success', 5000);
+    } catch (err) {
+      toastError(err.message || 'Request failed');
+    } finally {
+      setButtonLoading(btn, false);
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════
+// AUTH STYLES (scoped)
+// ═══════════════════════════════════════════════
+function injectAuthStyles() {
+  if (document.getElementById('auth-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'auth-styles';
+  style.textContent = `
+    .auth-shell {
+      min-height: 100vh;
+      width: 100%;
+      display: flex; align-items: center; justify-content: center;
+      padding: var(--s4);
+      background: var(--bg);
+      /* Cover full screen even inside the grid column */
+      position: fixed; inset: 0; overflow-y: auto;
+    }
+    .auth-card {
+      width: min(440px, 100%);
+      padding: var(--s7) var(--s6);
+      /* Ensure it's above everything */
+      position: relative; z-index: 1;
+    }
+    .auth-brand {
+      display: flex; align-items: center; gap: var(--s2);
+      margin-bottom: var(--s6);
+    }
+    .auth-brand-icon {
+      width: 32px; height: 32px;
+      background: var(--accent); color: #1a1400;
+      font-weight: 700; font-size: 1rem;
+      border-radius: var(--r-md);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .auth-brand-name {
+      font-family: var(--font-serif); font-size: 1.25rem;
+    }
+    .auth-heading {
+      font-family: var(--font-serif); font-size: 1.7rem; font-weight: 400;
+      letter-spacing: -0.01em; margin-bottom: var(--s1);
+    }
+    .auth-sub { color: var(--text-secondary); font-size: .88rem; margin-bottom: var(--s5); }
+    .auth-forgot { text-align: right; margin-top: var(--s2); }
+    .auth-link { color: var(--accent); font-size: .85rem; transition: opacity var(--t-fast); }
+    .auth-link:hover { opacity: .75; }
+    .auth-divider {
+      display: flex; align-items: center; gap: var(--s3);
+      color: var(--text-muted); font-size: .8rem; margin: var(--s5) 0;
+    }
+    .auth-divider::before,.auth-divider::after {
+      content:''; flex:1; height:1px; background: var(--border);
+    }
+    .auth-switch { text-align: center; font-size: .85rem; color: var(--text-secondary); margin-top: var(--s4); }
+    .auth-terms  { text-align: center; font-size: .78rem; color: var(--text-muted); margin-top: var(--s3); line-height: 1.5; }
+    .auth-back   {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--text-secondary); font-size: .85rem;
+      transition: color var(--t-fast);
+    }
+    .auth-back:hover { color: var(--text-primary); }
+    .input-password-wrap { position: relative; }
+    .input-password-wrap .input { padding-right: 40px; }
+    .password-toggle {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      color: var(--text-muted); transition: color var(--t-fast);
+    }
+    .password-toggle:hover { color: var(--text-primary); }
+  `;
+  document.head.appendChild(style);
+}
+
+/**
+ * feed.js — Explore & Following feed pages
+ * Renders post cards with like, comment, save, carousel support.
+ */
+
+import api from './api.js';
+import { toast, toastError, buildAvatar, relativeTime, formatCount, infiniteScroll } from './ui.js';
+
+// ═══════════════════════════════════════════════
+// FEED PAGE
+// ═══════════════════════════════════════════════
+export async function renderFeedPage(container) {
+  container.innerHTML = `
+    <div class="page-header">
+      <h1 class="page-title">Feed</h1>
+    </div>
+    <div class="page-body">
+      <div class="feed-tabs">
+        <button class="feed-tab active" data-tab="following">Following</button>
+        <button class="feed-tab" data-tab="explore">Explore</button>
+      </div>
+      <div id="feed-container" class="feed"></div>
+      <div id="feed-loader" style="display:none;padding:var(--s6);text-align:center">
+        <div class="spinner" style="margin:0 auto"></div>
+      </div>
+    </div>
+  `;
+
+  let currentTab = 'following';
+  let skip = 0;
+  const limit = 10;
+  let loading = false;
+  let hasMore = true;
+
+  const feedEl  = container.querySelector('#feed-container');
+  const loaderEl = container.querySelector('#feed-loader');
+
+  async function loadPosts(reset = false) {
+    if (loading || !hasMore) return;
+    loading = true;
+    loaderEl.style.display = 'block';
+
+    try {
+      const items = currentTab === 'following'
+        ? await api.posts.getFollowingFeed({ skip, limit })
+        : await api.posts.getExploreFeed({ skip, limit });
+
+      if (reset) feedEl.innerHTML = '';
+      if (items.length === 0) { hasMore = false; }
+      else {
+        items.forEach(p => feedEl.appendChild(buildPostCard(p)));
+        skip += items.length;
+        if (items.length < limit) hasMore = false;
+      }
+
+      if (!hasMore && feedEl.children.length > 0) {
+        const end = document.createElement('p');
+        end.style.cssText = 'text-align:center;color:var(--text-muted);font-size:.82rem;padding:var(--s6)';
+        end.textContent = "You're all caught up ✓";
+        feedEl.appendChild(end);
+      }
+    } catch (err) {
+      toastError('Failed to load posts');
+    } finally {
+      loading = false;
+      loaderEl.style.display = 'none';
+    }
+  }
+
+  // Tab switching
+  container.querySelectorAll('.feed-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      container.querySelectorAll('.feed-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentTab = tab.dataset.tab;
+      skip = 0; hasMore = true;
+      loadPosts(true);
+    });
+  });
+
+  // Infinite scroll
+  infiniteScroll(window, () => loadPosts());
+
+  loadPosts(true);
+}
+
+// ═══════════════════════════════════════════════
+// POST CARD BUILDER
+// ═══════════════════════════════════════════════
+export function buildPostCard(post) {
+  const card = document.createElement('article');
+  card.className = 'post-card';
+  card.dataset.postId = post.id;
+
+  // Header
+  const avatar = buildAvatar({ src: post.author?.avatar_path, username: post.author?.username, size: 'sm' });
+  const header = document.createElement('div');
+  header.className = 'post-header';
+  header.appendChild(avatar);
+  header.innerHTML += `
+    <div class="post-header-info">
+      <div class="post-author">${escHtml(post.author?.username || 'unknown')}</div>
+      ${post.location_name ? `<div class="post-location">${escHtml(post.location_name)}</div>` : ''}
+    </div>
+    <button class="post-menu" aria-label="Post options">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+        <circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>
+      </svg>
+    </button>
+  `;
+  // Re-prepend avatar (innerHTML wiped it)
+  header.prepend(avatar);
+  card.appendChild(header);
+
+  // Media
+  const media = post.media_items || [];
+  if (media.length > 0) {
+    card.appendChild(buildMediaSection(post.id, media));
+  }
+
+  // Actions
+  card.appendChild(buildActions(post));
+
+  // Body
+  card.appendChild(buildPostBody(post));
+
+  // Comment input
+  card.appendChild(buildCommentInput(post.id));
+
+  wirePostCard(card, post);
+  return card;
+}
+
+// ── Media / Carousel ──────────────────────────
+function buildMediaSection(postId, items) {
+  const wrap = document.createElement('div');
+  wrap.className = 'post-media';
+
+  if (items.length === 1) {
+    wrap.appendChild(buildMediaItem(items[0]));
+    return wrap;
+  }
+
+  // Carousel
+  let current = 0;
+
+  const slides = document.createElement('div');
+  slides.style.cssText = 'position:relative;overflow:hidden';
+  items.forEach((item, i) => {
+    const el = buildMediaItem(item);
+    el.style.display = i === 0 ? 'block' : 'none';
+    slides.appendChild(el);
+  });
+
+  const dots = document.createElement('div');
+  dots.className = 'carousel-dots';
+  items.forEach((_, i) => {
+    const d = document.createElement('div');
+    d.className = `carousel-dot${i === 0 ? ' active' : ''}`;
+    dots.appendChild(d);
+  });
+
+  const prev = document.createElement('button');
+  prev.className = 'carousel-btn prev';
+  prev.innerHTML = '‹'; prev.style.display = 'none';
+
+  const next = document.createElement('button');
+  next.className = 'carousel-btn next';
+  next.innerHTML = '›';
+
+  function goTo(idx) {
+    slides.children[current].style.display = 'none';
+    dots.children[current].classList.remove('active');
+    current = idx;
+    slides.children[current].style.display = 'block';
+    dots.children[current].classList.add('active');
+    prev.style.display = current === 0 ? 'none' : 'flex';
+    next.style.display = current === items.length - 1 ? 'none' : 'flex';
+  }
+
+  prev.addEventListener('click', () => goTo(current - 1));
+  next.addEventListener('click', () => goTo(current + 1));
+
+  slides.appendChild(prev);
+  slides.appendChild(next);
+  slides.appendChild(dots);
+  wrap.appendChild(slides);
+  return wrap;
+}
+
+function buildMediaItem(item) {
+  if (item.media_type === 'video') {
+    const v = document.createElement('video');
+    v.src = item.media_path || item.url || ''; v.controls = true; v.style.width = '100%';
+    return v;
+  }
+  const img = document.createElement('img');
+  img.src = item.media_path || item.url || ''; img.alt = '';
+  img.loading = 'lazy';
+  return img;
+}
+
+// ── Action Bar ────────────────────────────────
+function buildActions(post) {
+  const wrap = document.createElement('div');
+  wrap.className = 'post-actions';
+
+  const liked = post.is_liked || false;
+  const saved = post.is_saved || false;
+
+  wrap.innerHTML = `
+    <button class="action-btn like-btn ${liked ? 'liked' : ''}" data-liked="${liked}">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="${liked ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2">
+        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+      </svg>
+      <span class="like-count">${formatCount(post.like_count || 0)}</span>
+    </button>
+    <button class="action-btn comment-btn">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span>${formatCount(post.comment_count || 0)}</span>
+    </button>
+    <button class="action-btn share-btn">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+      </svg>
+    </button>
+    <button class="action-btn action-btn-save save-btn ${saved ? 'saved' : ''}" data-saved="${saved}">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="${saved ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2">
+        <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+      </svg>
+    </button>
+  `;
+  return wrap;
+}
+
+// ── Post Body ─────────────────────────────────
+function buildPostBody(post) {
+  const body = document.createElement('div');
+  body.className = 'post-body';
+
+  const likeCount = post.hide_like_count ? '' : `<div class="post-likes">${formatCount(post.like_count || 0)} likes</div>`;
+
+  const caption = post.caption
+    ? `<div class="post-caption">
+         <span class="author-tag">${escHtml(post.author?.username || '')}</span>
+         ${formatCaption(post.caption)}
+       </div>`
+    : '';
+
+  const preview = (post.preview_comments || []).map(c => `
+    <div class="comment-preview-item">
+      <span class="author">${escHtml(c.author?.username || '')}</span>${escHtml(c.text)}
+    </div>
+  `).join('');
+
+  const viewMore = post.comment_count > 2
+    ? `<button class="view-comments-btn">View all ${formatCount(post.comment_count)} comments</button>`
+    : '';
+
+  body.innerHTML = `
+    ${likeCount}
+    ${caption}
+    ${preview || viewMore
+      ? `<div class="post-comments-preview">${preview}${viewMore}</div>`
+      : ''}
+    <div class="post-timestamp">${relativeTime(post.created_at)}</div>
+  `;
+  return body;
+}
+
+// ── Comment Input ─────────────────────────────
+function buildCommentInput(postId) {
+  const wrap = document.createElement('div');
+  wrap.className = 'post-comment-input';
+  wrap.innerHTML = `
+    <textarea class="comment-field" rows="1" placeholder="Add a comment…" maxlength="500"></textarea>
+    <button class="comment-submit" disabled>Post</button>
+  `;
+  return wrap;
+}
+
+// ── Wire Interactions ─────────────────────────
+function wirePostCard(card, post) {
+  const postId = post.id;
+
+  // Like
+  const likeBtn = card.querySelector('.like-btn');
+  const likeCountEl = card.querySelector('.like-count');
+  likeBtn.addEventListener('click', async () => {
+    const isLiked = likeBtn.dataset.liked === 'true';
+    const prev = parseInt(likeCountEl.textContent) || 0;
+
+    // Optimistic
+    likeBtn.dataset.liked = String(!isLiked);
+    likeBtn.classList.toggle('liked', !isLiked);
+    likeBtn.querySelector('svg').setAttribute('fill', !isLiked ? 'currentColor' : 'none');
+    likeCountEl.textContent = formatCount(!isLiked ? prev + 1 : Math.max(0, prev - 1));
+
+    try {
+      if (isLiked) await api.posts.unlike(postId);
+      else         await api.posts.like(postId);
+    } catch {
+      // Revert
+      likeBtn.dataset.liked = String(isLiked);
+      likeBtn.classList.toggle('liked', isLiked);
+      likeBtn.querySelector('svg').setAttribute('fill', isLiked ? 'currentColor' : 'none');
+      likeCountEl.textContent = formatCount(prev);
+      toastError('Could not update like');
+    }
+  });
+
+  // Save
+  const saveBtn = card.querySelector('.save-btn');
+  saveBtn.addEventListener('click', async () => {
+    const isSaved = saveBtn.dataset.saved === 'true';
+    saveBtn.dataset.saved = String(!isSaved);
+    saveBtn.classList.toggle('saved', !isSaved);
+    saveBtn.querySelector('svg').setAttribute('fill', !isSaved ? 'currentColor' : 'none');
+    try {
+      if (isSaved) await api.posts.unsave(postId);
+      else         await api.posts.save(postId);
+    } catch {
+      saveBtn.dataset.saved = String(isSaved);
+      saveBtn.classList.toggle('saved', isSaved);
+      saveBtn.querySelector('svg').setAttribute('fill', isSaved ? 'currentColor' : 'none');
+      toastError('Could not update save');
+    }
+  });
+
+  // Comment textarea enable/disable submit
+  const textarea = card.querySelector('.comment-field');
+  const submitBtn = card.querySelector('.comment-submit');
+  textarea.addEventListener('input', () => {
+    submitBtn.disabled = textarea.value.trim().length === 0;
+    textarea.style.height = 'auto';
+    textarea.style.height = textarea.scrollHeight + 'px';
+  });
+
+  // Submit comment
+  submitBtn.addEventListener('click', async () => {
+    const text = textarea.value.trim();
+    if (!text) return;
+    submitBtn.disabled = true;
+    try {
+      await api.posts.addComment(postId, text);
+      textarea.value = '';
+      textarea.style.height = 'auto';
+      toast('Comment posted', 'success', 1800);
+    } catch {
+      toastError('Failed to post comment');
+      submitBtn.disabled = false;
+    }
+  });
+
+  // Share — copy link
+  card.querySelector('.share-btn').addEventListener('click', () => {
+    const url = `${window.location.origin}#post/${postId}`;
+    navigator.clipboard?.writeText(url).then(() => toast('Link copied!', 'success', 1800));
+  });
+
+  // View comments
+  card.querySelector('.view-comments-btn')?.addEventListener('click', () => {
+    window.location.hash = `#post/${postId}`;
+  });
+}
+
+// ── Helpers ───────────────────────────────────
+function escHtml(str = '') {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatCaption(text = '') {
+  return escHtml(text)
+    .replace(/#(\w+)/g, '<span class="hashtag">#$1</span>')
+    .replace(/@(\w+)/g, '<span class="author-tag">@$1</span>');
+}
+/**
+ * messages.js — Full messaging UI
+ * Thread list, chat window, send message, reactions, group management.
+ */
+
+import api from './api.js';
+import { toast, toastError, buildAvatar, relativeTime, attachEmojiPicker, confirm, modal } from './ui.js';
+import { getCurrentUser } from './auth.js';
+
+// ── State ─────────────────────────────────────
+let activeThreadId = null;
+let messagesBefore = null;   // cursor for pagination
+let loadingMessages = false;
+let hasMoreMessages = true;
+
+// ═══════════════════════════════════════════════
+// MESSAGES PAGE
+// ═══════════════════════════════════════════════
+export async function renderMessagesPage(container, openThreadId = null) {
+  container.innerHTML = `
+    <div class="messages-layout" style="height:100vh">
+      <!-- Thread list -->
+      <div class="threads-list" id="threads-list">
+        <div class="threads-header">
+          <span class="threads-title">Messages</span>
+          <button class="btn-icon" id="new-group-btn" title="New group">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+          </button>
+        </div>
+        <div class="threads-search">
+          <input type="text" class="input" id="thread-search" placeholder="Search conversations…" />
+        </div>
+        <div class="thread-items" id="thread-items">
+          <div style="padding:var(--s5);text-align:center"><div class="spinner" style="margin:0 auto"></div></div>
+        </div>
+      </div>
+
+      <!-- Chat window -->
+      <div class="chat-window" id="chat-window">
+        <div class="empty-state" style="flex:1">
+          <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <p style="color:var(--text-muted)">Select a conversation</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  await loadThreadList(container);
+
+  // New group button
+  container.querySelector('#new-group-btn').addEventListener('click', () => openNewGroupModal(container));
+
+  // Thread search filter
+  const searchEl = container.querySelector('#thread-search');
+  searchEl.addEventListener('input', () => filterThreadItems(container, searchEl.value.trim().toLowerCase()));
+
+  // Auto-open thread from hash
+  if (openThreadId) openChatWindow(container, parseInt(openThreadId));
+}
+
+// ═══════════════════════════════════════════════
+// THREAD LIST
+// ═══════════════════════════════════════════════
+async function loadThreadList(container) {
+  const listEl = container.querySelector('#thread-items');
+  try {
+    const threads = await api.messages.getThreads({ limit: 50 });
+    listEl.innerHTML = '';
+    if (threads.length === 0) {
+      listEl.innerHTML = '<div class="empty-state"><p>No conversations yet.</p></div>';
+      return;
+    }
+    threads.forEach(t => listEl.appendChild(buildThreadItem(t, container)));
+  } catch {
+    listEl.innerHTML = '<div class="empty-state"><p>Failed to load.</p></div>';
+  }
+}
+
+function buildThreadItem(thread, container) {
+  const item = document.createElement('div');
+  item.className = 'thread-item';
+  item.dataset.threadId = thread.id;
+
+  const name = getThreadName(thread);
+  const preview = thread.last_message_preview || '';
+  const unread  = thread.unread_count > 0;
+
+  const _otherMember = !thread.is_group ? (thread.members || []).find(m => m.user_id !== getCurrentUser()?.id) : null;
+  const avatarSrc = thread.is_group ? thread.group_cover_path : _otherMember?.avatar_path;
+  const avatarUser = thread.is_group ? name : _otherMember?.username;
+  const avatar = buildAvatar({ src: avatarSrc, username: avatarUser, size: 'sm' });
+
+  item.appendChild(avatar);
+  item.innerHTML += `
+    <div class="thread-info">
+      <div class="thread-name">
+        <span>${escHtml(name)}</span>
+        <span class="thread-time">${thread.last_message_at ? relativeTime(thread.last_message_at) : ''}</span>
+      </div>
+      <div class="thread-preview ${unread ? 'unread' : ''}">${escHtml(preview)}</div>
+    </div>
+    ${unread ? `<div class="thread-unread-dot"></div>` : ''}
+  `;
+  item.prepend(avatar);
+
+  item.addEventListener('click', () => openChatWindow(container, thread.id));
+  return item;
+}
+
+function filterThreadItems(container, query) {
+  container.querySelectorAll('.thread-item').forEach(item => {
+    const name = item.querySelector('.thread-name span')?.textContent.toLowerCase() || '';
+    item.style.display = !query || name.includes(query) ? '' : 'none';
+  });
+}
+
+// ═══════════════════════════════════════════════
+// CHAT WINDOW
+// ═══════════════════════════════════════════════
+async function openChatWindow(container, threadId) {
+  // Mark active in list
+  container.querySelectorAll('.thread-item').forEach(el => {
+    el.classList.toggle('active', parseInt(el.dataset.threadId) === threadId);
+  });
+
+  activeThreadId = threadId;
+  messagesBefore = null;
+  hasMoreMessages = true;
+  loadingMessages = false;
+
+  const chatWin = container.querySelector('#chat-window');
+  chatWin.innerHTML = `
+    <div class="chat-header" id="chat-header">
+      <div class="spinner" style="margin:0 auto"></div>
+    </div>
+    <div class="messages-area" id="messages-area">
+      <div style="text-align:center;padding:var(--s4)"><div class="spinner" style="margin:0 auto"></div></div>
+    </div>
+    <div class="chat-input-area" id="chat-input-area" style="display:none"></div>
+  `;
+
+  let thread;
+  try {
+    thread = await api.messages.getThread(threadId);
+  } catch {
+    chatWin.innerHTML = '<div class="empty-state"><p>Could not load thread.</p></div>';
+    return;
+  }
+
+  renderChatHeader(container, thread);
+  renderChatInputArea(container, threadId);
+  await loadMessages(container, threadId, true);
+
+  // Scroll to bottom
+  const area = container.querySelector('#messages-area');
+  area.scrollTop = area.scrollHeight;
+
+  // Load more on scroll up
+  area.addEventListener('scroll', () => {
+    if (area.scrollTop < 120 && !loadingMessages && hasMoreMessages) {
+      loadMessages(container, threadId, false);
+    }
+  });
+}
+
+function renderChatHeader(container, thread) {
+  const headerEl = container.querySelector('#chat-header');
+  const name = getThreadName(thread);
+  const _om = !thread.is_group ? (thread.members||[]).find(m=>m.user_id!==getCurrentUser()?.id) : null;
+  const avatarSrc = thread.is_group ? thread.group_cover_path : _om?.avatar_path;
+  const avatar = buildAvatar({ src: avatarSrc, username: name, size: 'sm' });
+
+  headerEl.innerHTML = '';
+  headerEl.appendChild(avatar);
+
+  const info = document.createElement('div');
+  info.innerHTML = `
+    <div class="chat-title">${escHtml(name)}</div>
+    <div class="chat-subtitle">
+      ${thread.is_group
+        ? `${(thread.members||[]).filter(m=>!m.left_at).length} members`
+        : ''}
+    </div>
+  `;
+  headerEl.appendChild(info);
+
+  const actions = document.createElement('div');
+  actions.className = 'chat-header-actions';
+
+  if (thread.is_group) {
+    const manageBtn = document.createElement('button');
+    manageBtn.className = 'btn btn-ghost btn-sm';
+    manageBtn.textContent = 'Manage';
+    manageBtn.addEventListener('click', () => openGroupManageModal(thread));
+    actions.appendChild(manageBtn);
+  }
+
+  const leaveBtn = document.createElement('button');
+  leaveBtn.className = 'btn-icon';
+  leaveBtn.title = 'Leave / close';
+  leaveBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`;
+  leaveBtn.addEventListener('click', async () => {
+    if (!thread.is_group) return;
+    const ok = await confirm({ title: 'Leave group?', danger: true, confirmLabel: 'Leave' });
+    if (!ok) return;
+    try { await api.messages.leaveThread(thread.id); window.location.hash = '#messages'; toast('Left group', 'success'); }
+    catch { toastError('Failed to leave'); }
+  });
+  actions.appendChild(leaveBtn);
+  headerEl.appendChild(actions);
+}
+
+// ═══════════════════════════════════════════════
+// MESSAGES
+// ═══════════════════════════════════════════════
+async function loadMessages(container, threadId, reset = false) {
+  if (loadingMessages) return;
+  loadingMessages = true;
+  const area = container.querySelector('#messages-area');
+  if (!area) { loadingMessages = false; return; }
+
+  const prevHeight = area.scrollHeight;
+
+  try {
+    const items = await api.messages.getMessages(threadId, { limit: 30, beforeId: messagesBefore });
+    if (items.length === 0) { hasMoreMessages = false; loadingMessages = false; return; }
+
+    // Oldest first — API returns ascending, but we paginate backwards
+    messagesBefore = items[0].id;
+    if (items.length < 30) hasMoreMessages = false;
+
+    if (reset) area.innerHTML = '';
+
+    const fragment = buildMessageGroups(items, reset);
+    if (reset) area.appendChild(fragment);
+    else       area.insertBefore(fragment, area.firstChild);
+
+    // Maintain scroll position on prepend
+    if (!reset) area.scrollTop = area.scrollHeight - prevHeight;
+  } catch {
+    toastError('Failed to load messages');
+  } finally {
+    loadingMessages = false;
+  }
+}
+
+function buildMessageGroups(messages, isBottom = true) {
+  const me = getCurrentUser();
+  const fragment = document.createDocumentFragment();
+  let lastDate = null;
+
+  messages.forEach(msg => {
+    // Day separator
+    const msgDate = new Date(msg.created_at).toDateString();
+    if (msgDate !== lastDate) {
+      const sep = document.createElement('div');
+      sep.className = 'day-separator';
+      sep.textContent = new Date(msg.created_at).toLocaleDateString(undefined, { weekday:'short', month:'short', day:'numeric' });
+      fragment.appendChild(sep);
+      lastDate = msgDate;
+    }
+
+    const isOwn = me && msg.sender_id === me.id;
+    const group = document.createElement('div');
+    group.className = `msg-group ${isOwn ? 'outgoing' : 'incoming'}`;
+    group.dataset.msgId = msg.id;
+
+    const row = document.createElement('div');
+    row.className = 'msg-row';
+
+    if (!isOwn) {
+      const avatar = buildAvatar({ src: msg.sender_avatar, username: msg.sender_username, size: 'xs' });
+      row.appendChild(avatar);
+    }
+
+    const bubbleWrap = document.createElement('div');
+
+    // Media
+    if (msg.media_path && !msg.is_deleted) {
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'msg-image';
+      if (msg.message_type === 'video') {
+        imgWrap.innerHTML = `<video src="${escHtml(msg.media_path)}" controls style="max-width:240px;border-radius:var(--r-md)"></video>`;
+      } else {
+        imgWrap.innerHTML = `<img src="${escHtml(msg.media_path)}" alt="attachment" />`;
+        imgWrap.querySelector('img').addEventListener('click', () => openLightbox(msg.media_path));
+      }
+      bubbleWrap.appendChild(imgWrap);
+    }
+
+    // Text bubble
+    if (msg.content && !msg.is_deleted) {
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-bubble';
+      bubble.textContent = msg.content;
+      bubbleWrap.appendChild(bubble);
+    }
+
+    // Unsent
+    if (msg.is_deleted) {
+      const unsent = document.createElement('div');
+      unsent.className = 'msg-bubble';
+      unsent.style.cssText = 'color:var(--text-muted);font-style:italic;font-size:.82rem';
+      unsent.textContent = 'Message unsent';
+      bubbleWrap.appendChild(unsent);
+    }
+
+    // Reactions
+    if (msg.reactions?.length) {
+      const reactRow = document.createElement('div');
+      reactRow.className = 'msg-reactions';
+      const grouped = groupReactions(msg.reactions);
+      Object.entries(grouped).forEach(([emoji, count]) => {
+        const pill = document.createElement('button');
+        pill.className = 'reaction-pill';
+        pill.innerHTML = `${emoji} <span>${count}</span>`;
+        pill.addEventListener('click', () => toggleReaction(pill, msg.id, emoji));
+        reactRow.appendChild(pill);
+      });
+      bubbleWrap.appendChild(reactRow);
+    }
+
+    // Meta + right-click for reaction/unsend
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = relativeTime(msg.created_at);
+    if (isOwn) meta.textContent += ' · Sent';
+    bubbleWrap.appendChild(meta);
+
+    row.appendChild(bubbleWrap);
+    group.appendChild(row);
+    attachMessageContextMenu(group, msg, isOwn);
+    fragment.appendChild(group);
+  });
+
+  return fragment;
+}
+
+function attachMessageContextMenu(group, msg, isOwn) {
+  group.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const existing = document.querySelector('.msg-context-menu');
+    existing?.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'msg-context-menu';
+    menu.style.cssText = `
+      position:fixed;top:${e.clientY}px;left:${e.clientX}px;
+      background:var(--bg-raised);border:1px solid var(--border);
+      border-radius:var(--r-md);padding:var(--s2);min-width:150px;
+      box-shadow:var(--shadow-md);z-index:600;
+    `;
+
+    const reactItem = createMenuItem('React', '😀', () => {
+      menu.remove();
+      promptReaction(msg.id);
+    });
+    menu.appendChild(reactItem);
+
+    if (isOwn && !msg.is_deleted) {
+      const unsendItem = createMenuItem('Unsend', '🗑', async () => {
+        menu.remove();
+        const ok = await confirm({ title: 'Unsend message?', danger: true, confirmLabel: 'Unsend' });
+        if (!ok) return;
+        try {
+          await api.messages.unsendMessage(msg.id);
+          group.querySelector('.msg-bubble').style.cssText = 'color:var(--text-muted);font-style:italic';
+          group.querySelector('.msg-bubble').textContent = 'Message unsent';
+        } catch { toastError('Failed to unsend'); }
+      });
+      unsendItem.style.color = 'var(--danger)';
+      menu.appendChild(unsendItem);
+    }
+
+    document.body.appendChild(menu);
+    setTimeout(() => document.addEventListener('click', function h() { menu.remove(); document.removeEventListener('click', h); }, 0));
+  });
+}
+
+function createMenuItem(label, icon, onClick) {
+  const btn = document.createElement('button');
+  btn.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 12px;width:100%;border-radius:var(--r-sm);font-size:.85rem;transition:background var(--t-fast)';
+  btn.innerHTML = `<span>${icon}</span> ${escHtml(label)}`;
+  btn.onmouseenter = () => btn.style.background = 'var(--bg-surface)';
+  btn.onmouseleave = () => btn.style.background = '';
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+async function promptReaction(msgId) {
+  const emojis = ['❤️','😂','😮','😢','😡','👍','🔥','🎉','👀','💯'];
+  const m = modal({
+    title: 'React',
+    content: `<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">
+      ${emojis.map(e => `<button class="react-emoji-btn" data-emoji="${e}" style="font-size:1.8rem;background:none;border:none;cursor:pointer;padding:6px;border-radius:8px;transition:background 120ms">${e}</button>`).join('')}
+    </div>`,
+  });
+  m.el.querySelectorAll('.react-emoji-btn').forEach(btn => {
+    btn.addEventListener('mouseenter', () => btn.style.background = 'var(--bg-raised)');
+    btn.addEventListener('mouseleave', () => btn.style.background = 'none');
+    btn.addEventListener('click', async () => {
+      m.close();
+      try { await api.messages.addReaction(msgId, btn.dataset.emoji); toast('Reaction added', 'success', 1500); }
+      catch { toastError('Failed to react'); }
+    });
+  });
+}
+
+async function toggleReaction(pill, msgId, emoji) {
+  const isOwn = pill.classList.contains('own');
+  try {
+    if (isOwn) { await api.messages.removeReaction(msgId); pill.classList.remove('own'); }
+    else        { await api.messages.addReaction(msgId, emoji); pill.classList.add('own'); }
+  } catch { toastError('Failed'); }
+}
+
+function groupReactions(reactions) {
+  const map = {};
+  reactions.forEach(r => { map[r.emoji] = (map[r.emoji] || 0) + 1; });
+  return map;
+}
+
+// ═══════════════════════════════════════════════
+// CHAT INPUT
+// ═══════════════════════════════════════════════
+function renderChatInputArea(container, threadId) {
+  const area = container.querySelector('#chat-input-area');
+  area.style.display = '';
+  area.innerHTML = `
+    <button class="btn-icon" id="attach-btn" title="Attach file">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+      </svg>
+    </button>
+    <input type="file" id="file-input" accept="image/*,video/*,audio/*" style="display:none" />
+    <div class="chat-input-wrap">
+      <button class="chat-emoji-btn" id="emoji-btn">😊</button>
+      <textarea class="chat-textarea" id="chat-textarea" rows="1" placeholder="Message…"></textarea>
+    </div>
+    <button class="chat-send-btn" id="send-btn" disabled>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+        <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+      </svg>
+    </button>
+  `;
+
+  const textarea = area.querySelector('#chat-textarea');
+  const sendBtn  = area.querySelector('#send-btn');
+  const fileInput = area.querySelector('#file-input');
+  let pendingFile = null;
+
+  // Auto-resize textarea
+  textarea.addEventListener('input', () => {
+    sendBtn.disabled = !textarea.value.trim() && !pendingFile;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+  });
+
+  // Send on Enter (Shift+Enter = newline)
+  textarea.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); }
+  });
+
+  // File attach
+  area.querySelector('#attach-btn').addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    pendingFile = fileInput.files[0] || null;
+    if (pendingFile) {
+      sendBtn.disabled = false;
+      const preview = area.querySelector('#file-preview');
+      if (!preview) {
+        const p = document.createElement('div');
+        p.id = 'file-preview';
+        p.style.cssText = 'position:absolute;bottom:calc(100% + 4px);left:var(--s4);background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:6px 10px;font-size:.8rem;display:flex;align-items:center;gap:8px';
+        p.innerHTML = `<span>📎 ${escHtml(pendingFile.name)}</span><button id="remove-file" style="color:var(--danger);font-size:.75rem">✕</button>`;
+        area.style.position = 'relative';
+        area.appendChild(p);
+        p.querySelector('#remove-file').addEventListener('click', () => {
+          pendingFile = null; fileInput.value = ''; p.remove();
+          sendBtn.disabled = !textarea.value.trim();
+        });
+      }
+    }
+  });
+
+  // Emoji
+  attachEmojiPicker(area.querySelector('#emoji-btn'), (emoji) => {
+    textarea.value += emoji;
+    textarea.dispatchEvent(new Event('input'));
+    textarea.focus();
+  });
+
+  // Send
+  sendBtn.addEventListener('click', async () => {
+    const text = textarea.value.trim();
+    if (!text && !pendingFile) return;
+
+    sendBtn.disabled = true;
+    const file = pendingFile;
+
+    // Optimistic UI
+    const me = getCurrentUser();
+    const fakeMsg = {
+      id: Date.now(), content: text, sender_id: me?.id,
+      sender_username: me?.username, sender_avatar: me?.profile?.avatar_path,
+      created_at: new Date().toISOString(),
+      media_path: null, is_deleted: false, reactions: [], read_receipts: [],
+      message_type: 'text',
+    };
+    const msgArea = container.querySelector('#messages-area');
+    const frag = buildMessageGroups([fakeMsg]);
+    msgArea.appendChild(frag);
+    msgArea.scrollTop = msgArea.scrollHeight;
+
+    textarea.value = '';
+    textarea.style.height = 'auto';
+    pendingFile = null;
+    fileInput.value = '';
+    area.querySelector('#file-preview')?.remove();
+
+    try {
+      await api.messages.sendMessage(threadId, text, file);
+    } catch {
+      toastError('Failed to send message');
+    } finally {
+      sendBtn.disabled = false;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════
+// NEW GROUP MODAL
+// ═══════════════════════════════════════════════
+function openNewGroupModal(container) {
+  const m = modal({
+    title: 'New group',
+    content: `
+      <div class="flex-col gap-4">
+        <div class="input-group">
+          <label>Group name</label>
+          <input type="text" id="group-name-input" class="input" placeholder="e.g. Weekend crew" />
+        </div>
+        <div class="input-group">
+          <label>Add members (search by username)</label>
+          <input type="text" id="member-search-input" class="input" placeholder="Search…" />
+          <div id="member-search-results" style="margin-top:var(--s2);max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
+        </div>
+        <div id="selected-members" style="display:flex;flex-wrap:wrap;gap:var(--s2)"></div>
+      </div>
+    `,
+    footer: `
+      <div class="flex gap-3" style="justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" id="cancel-group">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="create-group-btn">Create group</button>
+      </div>
+    `,
+  });
+
+  const selectedIds = new Set();
+  const selectedEl  = m.el.querySelector('#selected-members');
+  const searchEl    = m.el.querySelector('#member-search-input');
+  const resultsEl   = m.el.querySelector('#member-search-results');
+
+  m.el.querySelector('#cancel-group').addEventListener('click', m.close);
+
+  // Search
+  let searchTimeout;
+  searchEl.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(async () => {
+      const q = searchEl.value.trim();
+      if (q.length < 2) { resultsEl.innerHTML = ''; return; }
+      try {
+        const users = await api.users.search({ username: q, limit: 6 });
+        resultsEl.innerHTML = '';
+        users.forEach(u => {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:var(--s2);padding:6px 8px;border-radius:var(--r-sm);cursor:pointer;transition:background var(--t-fast)';
+          row.onmouseenter = () => row.style.background = 'var(--bg-raised)';
+          row.onmouseleave = () => row.style.background = '';
+          const av = buildAvatar({ src: u.avatar_url, username: u.username, size: 'xs' });
+          row.appendChild(av);
+          row.innerHTML += `<span style="font-size:.87rem">${escHtml(u.username)}</span>`;
+          row.prepend(av);
+          row.addEventListener('click', () => {
+            if (selectedIds.has(u.id)) return;
+            selectedIds.add(u.id);
+            addSelectedChip(u, selectedEl, selectedIds);
+            resultsEl.innerHTML = '';
+            searchEl.value = '';
+          });
+          resultsEl.appendChild(row);
+        });
+      } catch { /* ignore */ }
+    }, 300);
+  });
+
+  // Create
+  m.el.querySelector('#create-group-btn').addEventListener('click', async () => {
+    const name = m.el.querySelector('#group-name-input').value.trim();
+    if (!name) { toast('Group name required', 'error'); return; }
+    if (selectedIds.size === 0) { toast('Add at least one member', 'error'); return; }
+    try {
+      const thread = await api.messages.createGroup({ name, member_ids: [...selectedIds] });
+      m.close();
+      toast('Group created!', 'success');
+      await loadThreadList(container);
+      openChatWindow(container, thread.id);
+    } catch { toastError('Failed to create group'); }
+  });
+}
+
+function addSelectedChip(user, container, selectedIds) {
+  const chip = document.createElement('div');
+  chip.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:4px 10px;background:var(--accent-dim);border:1px solid var(--accent);border-radius:var(--r-full);font-size:.8rem';
+  chip.innerHTML = `<span>${escHtml(user.username)}</span><button style="color:var(--accent);font-size:.75rem;margin-left:2px">✕</button>`;
+  chip.querySelector('button').addEventListener('click', () => {
+    selectedIds.delete(user.id);
+    chip.remove();
+  });
+  container.appendChild(chip);
+}
+
+// ═══════════════════════════════════════════════
+// GROUP MANAGE MODAL
+// ═══════════════════════════════════════════════
+function openGroupManageModal(thread) {
+  const me = getCurrentUser();
+  const isAdmin = thread.members?.some(m => m.user_id === me?.id && m.is_admin);
+
+  const membersHtml = (thread.members || []).map(mem => `
+    <div class="user-follow-card" style="padding:var(--s2) 0" data-member-id="${mem.user_id}">
+      <div class="avatar avatar-sm" style="background:var(--bg-raised);display:flex;align-items:center;justify-content:center;color:var(--text-muted)">
+        ${(mem.username || '?')[0].toUpperCase()}
+      </div>
+      <div class="user-follow-info">
+        <div class="user-follow-name">${escHtml(mem.username || '')} ${mem.is_admin ? '<span class="badge">Admin</span>' : ''}</div>
+      </div>
+      ${isAdmin && mem.user_id !== me?.id ? `
+        <div class="flex gap-2">
+          <button class="btn btn-ghost btn-sm promote-btn" data-uid="${mem.user_id}">Promote</button>
+          <button class="btn btn-danger btn-sm remove-btn" data-uid="${mem.user_id}">Remove</button>
+        </div>
+      ` : ''}
+    </div>
+  `).join('');
+
+  const m = modal({
+    title: escHtml(thread.group_name || 'Group'),
+    content: `
+      <div class="flex-col gap-3">
+        ${isAdmin ? `
+          <div class="input-group">
+            <label>Group name</label>
+            <div class="flex gap-2">
+              <input id="group-rename" type="text" class="input" value="${escHtml(thread.group_name || '')}" style="flex:1" />
+              <button class="btn btn-primary btn-sm" id="rename-btn">Save</button>
+            </div>
+          </div>
+          <div class="divider"></div>
+        ` : ''}
+        <div style="font-size:.8rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em">Members</div>
+        <div>${membersHtml}</div>
+      </div>
+    `,
+  });
+
+  // Rename
+  m.el.querySelector('#rename-btn')?.addEventListener('click', async () => {
+    const name = m.el.querySelector('#group-rename').value.trim();
+    if (!name) return;
+    try { await api.messages.updateGroup(thread.id, { name }); toast('Renamed!', 'success'); m.close(); }
+    catch { toastError('Failed'); }
+  });
+
+  // Promote / Remove
+  m.el.querySelectorAll('.promote-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      try { await api.messages.promoteMember(thread.id, parseInt(btn.dataset.uid)); toast('Promoted to admin', 'success'); m.close(); }
+      catch { toastError('Failed'); }
+    });
+  });
+  m.el.querySelectorAll('.remove-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const ok = await confirm({ title: 'Remove member?', danger: true, confirmLabel: 'Remove' });
+      if (!ok) return;
+      try { await api.messages.removeMember(thread.id, parseInt(btn.dataset.uid)); toast('Member removed', 'success'); m.close(); }
+      catch { toastError('Failed'); }
+    });
+  });
+}
+
+// ── Lightbox ──────────────────────────────────
+function openLightbox(url) {
+  const lb = document.createElement('div');
+  lb.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;z-index:9999;cursor:zoom-out';
+  lb.innerHTML = `<img src="${escHtml(url)}" style="max-width:90vw;max-height:90vh;object-fit:contain;border-radius:var(--r-md)" />`;
+  lb.addEventListener('click', () => lb.remove());
+  document.body.appendChild(lb);
+}
+
+// ── Helpers ───────────────────────────────────
+function getThreadName(thread) {
+  if (thread.group_name) return thread.group_name;
+  if (!thread.is_group) {
+    const me = getCurrentUser();
+    const other = (thread.members || []).find(m => m.user_id !== me?.id);
+    if (other) return other.username;
+  }
+  return 'Conversation';
+}
+
+function escHtml(str = '') {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+/**
+ * profile.js — User profile page
+ * Renders avatar, stats, bio, post grid, follow/unfollow button.
+ */
+
+import api from './api.js';
+import { toast, toastError, buildAvatar, formatCount, confirm, setButtonLoading, modal, relativeTime } from './ui.js';
+import { getCurrentUser } from './auth.js';
+
+// ═══════════════════════════════════════════════
+// PROFILE PAGE
+// ═══════════════════════════════════════════════
+/**
+ * @param {HTMLElement} container
+ * @param {string|number} userIdOrUsername  — numeric id OR @username string
+ */
+export async function renderProfilePage(container, userIdOrUsername) {
+  container.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;padding:var(--s8)">
+      <div class="spinner" style="width:32px;height:32px;border-width:3px"></div>
+    </div>
+  `;
+
+  let user;
+  try {
+    user = isNaN(userIdOrUsername)
+      ? await api.users.getByUsername(userIdOrUsername)
+      : await api.users.getById(userIdOrUsername);
+  } catch {
+    container.innerHTML = `<div class="empty-state"><p>User not found.</p></div>`;
+    return;
+  }
+
+  const me = getCurrentUser();
+  const isSelf = me && me.id === user.id;
+
+  container.innerHTML = `
+    <div class="page-header">
+      <button class="btn-icon" id="back-btn" aria-label="Back">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+          <path d="M19 12H5M12 19l-7-7 7-7"/>
+        </svg>
+      </button>
+      <h1 class="page-title">${escHtml(user.username)}</h1>
+    </div>
+
+    <div class="profile-header">
+      <div class="profile-avatar-wrap">
+        <div class="story-ring" id="story-ring" style="display:inline-block">
+          <div class="story-avatar-wrap">
+            <div id="profile-avatar-slot"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="profile-info">
+        <div class="profile-username-row">
+          <span class="profile-username">${escHtml(user.username)}</span>
+          <div class="flex gap-2" id="profile-actions"></div>
+        </div>
+
+        <div class="profile-stats">
+          <div class="profile-stat" id="stat-posts">
+            <span class="profile-stat-num" id="stat-posts-count">—</span>
+            <span class="profile-stat-label">Posts</span>
+          </div>
+          <div class="profile-stat" id="stat-followers" role="button" tabindex="0">
+            <span class="profile-stat-num">${formatCount(user.profile?.follower_count ?? user.follower_count ?? 0)}</span>
+            <span class="profile-stat-label">Followers</span>
+          </div>
+          <div class="profile-stat" id="stat-following" role="button" tabindex="0">
+            <span class="profile-stat-num">${formatCount(user.profile?.following_count ?? user.following_count ?? 0)}</span>
+            <span class="profile-stat-label">Following</span>
+          </div>
+        </div>
+
+        <div class="profile-bio">
+          ${(user.profile?.full_name || user.full_name) ? `<span class="profile-name">${escHtml(user.profile?.full_name || user.full_name || '')}</span>` : ''}
+          ${(user.profile?.bio || user.bio) ? `<p>${escHtml(user.profile?.bio || user.bio || '')}</p>` : ''}
+          ${(user.profile?.website || user.website) ? `<a href="${escHtml(user.profile?.website || user.website || '')}" target="_blank" rel="noopener" class="profile-website">${escHtml(user.profile?.website || user.website || '')}</a>` : ''}
+        </div>
+      </div>
+    </div>
+
+    <div class="divider" style="margin:0"></div>
+
+    <div id="profile-grid-section">
+      <div id="profile-post-grid" class="post-grid" style="padding:2px"></div>
+      <div id="profile-grid-loader" style="display:none;padding:var(--s5);text-align:center">
+        <div class="spinner" style="margin:0 auto"></div>
+      </div>
+      <div id="profile-grid-empty" style="display:none">
+        <div class="empty-state" style="padding:var(--s8)">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+          </svg>
+          <p>No posts yet</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Avatar
+  const avatarSlot = container.querySelector('#profile-avatar-slot');
+  const avatarEl = buildAvatar({ src: user.profile?.avatar_path || user.avatar_url, username: user.username, size: 'xl' });
+  avatarSlot.appendChild(avatarEl);
+
+  // Actions
+  renderProfileActions(container, user, isSelf, me);
+
+  // Back button
+  container.querySelector('#back-btn').addEventListener('click', () => history.back());
+
+  // Followers/following modals
+  container.querySelector('#stat-followers').addEventListener('click', () => openFollowModal(user.id, 'followers'));
+  container.querySelector('#stat-following').addEventListener('click', () => openFollowModal(user.id, 'following'));
+
+  // Load posts
+  await loadProfileGrid(container, user.id);
+}
+
+// ── Profile Actions ───────────────────────────
+function renderProfileActions(container, user, isSelf, me) {
+  const actionsEl = container.querySelector('#profile-actions');
+
+  if (isSelf) {
+    actionsEl.innerHTML = `
+      <a href="#settings" class="btn btn-ghost btn-sm">Edit profile</a>
+      <button class="btn btn-ghost btn-sm" id="archive-btn">Archive</button>
+    `;
+    container.querySelector('#archive-btn').addEventListener('click', () => {
+      window.location.hash = '#archived';
+    });
+    return;
+  }
+
+  if (!me) {
+    actionsEl.innerHTML = `<a href="#login" class="btn btn-primary btn-sm">Follow</a>`;
+    return;
+  }
+
+  const isFollowing = user.is_following || false;
+  const isPending   = user.follow_status === 'pending';
+
+  actionsEl.innerHTML = `
+    <button class="btn ${isFollowing ? 'btn-ghost' : 'btn-primary'} btn-sm" id="follow-btn">
+      ${isPending ? 'Requested' : isFollowing ? 'Following' : 'Follow'}
+    </button>
+    <button class="btn btn-ghost btn-sm" id="dm-btn">Message</button>
+    <button class="btn-icon" id="more-btn" aria-label="More options">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>
+      </svg>
+    </button>
+  `;
+
+  // Follow / Unfollow
+  const followBtn = container.querySelector('#follow-btn');
+  let following = isFollowing;
+  let pending   = isPending;
+
+  followBtn.addEventListener('click', async () => {
+    if (following || pending) {
+      const ok = await confirm({
+        title: following ? 'Unfollow?' : 'Cancel request?',
+        message: following
+          ? `You'll stop seeing ${user.username}'s posts.`
+          : 'Withdraw your follow request.',
+        confirmLabel: following ? 'Unfollow' : 'Cancel request',
+        danger: true,
+      });
+      if (!ok) return;
+      setButtonLoading(followBtn, true);
+      try {
+        await api.users.unfollow(user.id);
+        following = false; pending = false;
+        followBtn.textContent = 'Follow';
+        followBtn.classList.replace('btn-ghost', 'btn-primary');
+      } catch { toastError('Action failed'); }
+      finally { setButtonLoading(followBtn, false); }
+    } else {
+      setButtonLoading(followBtn, true);
+      try {
+        const res = await api.users.follow(user.id);
+        if (res.status === 'pending') {
+          pending = true; followBtn.textContent = 'Requested';
+          followBtn.classList.replace('btn-primary', 'btn-ghost');
+        } else {
+          following = true; followBtn.textContent = 'Following';
+          followBtn.classList.replace('btn-primary', 'btn-ghost');
+          toast(`You followed ${user.username}`, 'success', 2000);
+        }
+      } catch { toastError('Action failed'); }
+      finally { setButtonLoading(followBtn, false); }
+    }
+  });
+
+  // DM
+  container.querySelector('#dm-btn').addEventListener('click', async () => {
+    try {
+      const thread = await api.messages.getOrCreateDM(user.id);
+      window.location.hash = `#messages/${thread.id}`;
+    } catch { toastError('Could not open chat'); }
+  });
+
+  // More menu (block / report)
+  container.querySelector('#more-btn').addEventListener('click', (e) => {
+    openMoreMenu(e.currentTarget, user);
+  });
+}
+
+// ── Post Grid ─────────────────────────────────
+async function loadProfileGrid(container, userId) {
+  const grid    = container.querySelector('#profile-post-grid');
+  const loader  = container.querySelector('#profile-grid-loader');
+  const empty   = container.querySelector('#profile-grid-empty');
+  const statEl  = container.querySelector('#stat-posts-count');
+
+  loader.style.display = 'block';
+  try {
+    const posts = await api.posts.getUserPosts(userId, { limit: 30 });
+    statEl.textContent = formatCount(posts.length);
+
+    if (posts.length === 0) {
+      empty.style.display = 'block';
+    } else {
+      posts.forEach(post => grid.appendChild(buildGridItem(post)));
+    }
+  } catch {
+    toastError('Failed to load posts');
+  } finally {
+    loader.style.display = 'none';
+  }
+}
+
+function buildGridItem(post) {
+  const item = document.createElement('div');
+  item.className = 'post-grid-item';
+
+  const firstMedia = post.media_items?.[0];
+  const isVideo = firstMedia?.media_type === 'video';
+  const isCarousel = (post.media_items?.length || 0) > 1;
+
+  item.innerHTML = `
+    ${firstMedia ? `<img src="${escHtml(firstMedia.url)}" alt="" loading="lazy" />` : ''}
+    <div class="post-grid-overlay">
+      <div class="grid-stat">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        ${formatCount(post.like_count || 0)}
+      </div>
+      <div class="grid-stat">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        ${formatCount(post.comment_count || 0)}
+      </div>
+    </div>
+    ${isVideo ? `<div style="position:absolute;top:8px;right:8px;color:#fff;opacity:.85"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>` : ''}
+    ${isCarousel ? `<div style="position:absolute;top:8px;right:8px;color:#fff;opacity:.85"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="8" y="2" width="13" height="13" rx="2"/><rect x="2" y="8" width="13" height="13" rx="2"/></svg></div>` : ''}
+  `;
+
+  item.addEventListener('click', () => { window.location.hash = `#post/${post.id}`; });
+  return item;
+}
+
+// ── Followers / Following Modal ───────────────
+async function openFollowModal(userId, type) {
+  const m = modal({
+    title: type === 'followers' ? 'Followers' : 'Following',
+    content: '<div id="follow-modal-list" style="max-height:400px;overflow-y:auto"><div style="padding:var(--s5);text-align:center"><div class="spinner" style="margin:0 auto"></div></div></div>',
+  });
+
+  const listEl = m.el.querySelector('#follow-modal-list');
+  try {
+    const items = type === 'followers'
+      ? await api.users.getFollowers(userId)
+      : await api.users.getFollowing(userId);
+
+    if (items.length === 0) {
+      listEl.innerHTML = '<div class="empty-state"><p>No users yet.</p></div>';
+      return;
+    }
+
+    listEl.innerHTML = '';
+    items.forEach(u => listEl.appendChild(buildUserFollowCard(u, m.close)));
+  } catch {
+    listEl.innerHTML = '<div class="empty-state"><p>Failed to load.</p></div>';
+  }
+}
+
+function buildUserFollowCard(user, onClose) {
+  const card = document.createElement('div');
+  card.className = 'user-follow-card';
+  const avatar = buildAvatar({ src: user.avatar_url, username: user.username, size: 'sm' });
+  card.appendChild(avatar);
+  card.innerHTML += `
+    <div class="user-follow-info">
+      <div class="user-follow-name">${escHtml(user.username)}</div>
+      ${user.full_name ? `<div class="user-follow-meta">${escHtml(user.full_name)}</div>` : ''}
+    </div>
+    <a href="#profile/${user.username}" class="btn btn-ghost btn-sm" style="flex-shrink:0">View</a>
+  `;
+  card.querySelector('a').addEventListener('click', () => { onClose?.(); });
+  card.prepend(avatar);
+  return card;
+}
+
+// ── More menu (block) ─────────────────────────
+function openMoreMenu(trigger, user) {
+  const existing = document.querySelector('.profile-more-menu');
+  if (existing) { existing.remove(); return; }
+
+  const menu = document.createElement('div');
+  menu.className = 'profile-more-menu';
+  menu.style.cssText = `
+    position:absolute;right:0;top:calc(100% + 6px);
+    background:var(--bg-raised);border:1px solid var(--border);
+    border-radius:var(--r-md);overflow:hidden;min-width:160px;
+    box-shadow:var(--shadow-md);z-index:500;
+  `;
+  menu.innerHTML = `
+    <button class="menu-item" style="display:flex;align-items:center;gap:var(--s2);padding:10px var(--s4);width:100%;color:var(--danger);font-size:.87rem;transition:background var(--t-fast)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+      Block user
+    </button>
+    <button class="menu-item" style="display:flex;align-items:center;gap:var(--s2);padding:10px var(--s4);width:100%;color:var(--text-secondary);font-size:.87rem;transition:background var(--t-fast)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+      Report
+    </button>
+  `;
+
+  menu.querySelectorAll('.menu-item').forEach(item => {
+    item.addEventListener('mouseenter', () => item.style.background = 'var(--bg-surface)');
+    item.addEventListener('mouseleave', () => item.style.background = '');
+  });
+
+  const [blockBtn] = menu.querySelectorAll('.menu-item');
+  blockBtn.addEventListener('click', async () => {
+    menu.remove();
+    const ok = await confirm({
+      title: `Block ${user.username}?`,
+      message: 'They won\'t be able to find your profile or posts.',
+      confirmLabel: 'Block', danger: true,
+    });
+    if (ok) {
+      try { await api.users.block(user.id); toast('User blocked', 'success'); }
+      catch { toastError('Failed to block user'); }
+    }
+  });
+
+  trigger.style.position = 'relative';
+  trigger.appendChild(menu);
+  setTimeout(() => document.addEventListener('click', function h() {
+    menu.remove(); document.removeEventListener('click', h);
+  }), 0);
+}
+
+function escHtml(str = '') {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+/**
+ * ui.js — Reusable UI helpers
+ * toast(), modal(), confirm(), showSpinner(), hideSpinner(), avatarInitials()
+ */
+
+// ═══════════════════════════════════════════════
+// TOAST
+// ═══════════════════════════════════════════════
+let toastContainer = null;
+
+function getToastContainer() {
+  if (!toastContainer) {
+    toastContainer = document.createElement('div');
+    toastContainer.id = 'toast-container';
+    document.body.appendChild(toastContainer);
+  }
+  return toastContainer;
+}
+
+/**
+ * Show a toast notification.
+ * @param {string} message
+ * @param {'info'|'success'|'error'} type
+ * @param {number} duration  ms before auto-dismiss
+ */
+export function toast(message, type = 'info', duration = 3500) {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = message;
+  const container = getToastContainer();
+  container.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity 300ms, transform 300ms';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(12px)';
+    setTimeout(() => el.remove(), 320);
+  }, duration);
+}
+
+export const toastSuccess = (msg) => toast(msg, 'success');
+export const toastError   = (msg) => toast(msg, 'error');
+
+// ═══════════════════════════════════════════════
+// MODAL
+// ═══════════════════════════════════════════════
+/**
+ * Open a modal with custom HTML content.
+ * Returns a { close } handle.
+ *
+ * @param {{ title?: string, content: string, footer?: string }} opts
+ */
+export function modal({ title = '', content = '', footer = '' } = {}) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+
+  backdrop.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <span class="modal-title">${title}</span>
+        <button class="btn-icon modal-close-btn" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M18 6 6 18M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="modal-body">${content}</div>
+      ${footer ? `<div class="modal-footer" style="margin-top:var(--s5)">${footer}</div>` : ''}
+    </div>
+  `;
+
+  document.body.appendChild(backdrop);
+  document.body.style.overflow = 'hidden';
+
+  const close = () => {
+    backdrop.style.opacity = '0';
+    backdrop.style.transition = 'opacity 200ms';
+    setTimeout(() => {
+      backdrop.remove();
+      document.body.style.overflow = '';
+    }, 200);
+  };
+
+  backdrop.querySelector('.modal-close-btn').addEventListener('click', close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  document.addEventListener('keydown', function onKey(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+  });
+
+  return { el: backdrop, close };
+}
+
+// ═══════════════════════════════════════════════
+// CONFIRM DIALOG
+// ═══════════════════════════════════════════════
+/**
+ * Promise-based confirm dialog.
+ * @param {{ title?, message?, confirmLabel?, danger? }} opts
+ * @returns {Promise<boolean>}
+ */
+export function confirm({ title = 'Are you sure?', message = '', confirmLabel = 'Confirm', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const m = modal({
+      title,
+      content: message ? `<p style="color:var(--text-secondary);font-size:.9rem">${message}</p>` : '',
+      footer: `
+        <div class="flex gap-3" style="justify-content:flex-end">
+          <button class="btn btn-ghost btn-sm" id="confirm-cancel">Cancel</button>
+          <button class="btn ${danger ? 'btn-danger' : 'btn-primary'} btn-sm" id="confirm-ok">${confirmLabel}</button>
+        </div>
+      `,
+    });
+
+    m.el.querySelector('#confirm-cancel').addEventListener('click', () => { m.close(); resolve(false); });
+    m.el.querySelector('#confirm-ok').addEventListener('click',     () => { m.close(); resolve(true);  });
+  });
+}
+
+// ═══════════════════════════════════════════════
+// SPINNER
+// ═══════════════════════════════════════════════
+let globalSpinner = null;
+
+export function showSpinner() {
+  if (globalSpinner) return;
+  globalSpinner = document.createElement('div');
+  globalSpinner.style.cssText = `
+    position:fixed;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(4px);
+    display:flex;align-items:center;justify-content:center;z-index:9998;
+  `;
+  globalSpinner.innerHTML = '<div class="spinner" style="width:32px;height:32px;border-width:3px"></div>';
+  document.body.appendChild(globalSpinner);
+}
+
+export function hideSpinner() {
+  if (globalSpinner) { globalSpinner.remove(); globalSpinner = null; }
+}
+
+// ── Inline button loading state ───────────────
+export function setButtonLoading(btn, loading) {
+  if (loading) {
+    btn.dataset.originalText = btn.innerHTML;
+    btn.innerHTML = '<div class="spinner"></div>';
+    btn.disabled = true;
+  } else {
+    btn.innerHTML = btn.dataset.originalText || btn.innerHTML;
+    btn.disabled = false;
+  }
+}
+
+// ═══════════════════════════════════════════════
+// AVATAR
+// ═══════════════════════════════════════════════
+/**
+ * Build an avatar <img> or initials <div>.
+ * @param {{ src?, username?, size? }} opts
+ * @returns {HTMLElement}
+ */
+export function buildAvatar({ src, username = '?', size = 'md' } = {}) {
+  if (src) {
+    const img = document.createElement('img');
+    img.src = src;
+    img.alt = username;
+    img.className = `avatar avatar-${size}`;
+    img.onerror = () => replaceWithInitials(img, username, size);
+    return img;
+  }
+  return makeInitialsAvatar(username, size);
+}
+
+function makeInitialsAvatar(username, size) {
+  const div = document.createElement('div');
+  div.className = `avatar avatar-${size}`;
+  div.textContent = getInitials(username);
+  div.style.background = stringToColor(username);
+  return div;
+}
+
+function replaceWithInitials(img, username, size) {
+  const div = makeInitialsAvatar(username, size);
+  img.replaceWith(div);
+}
+
+function getInitials(name = '') {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return name.slice(0, 2).toUpperCase();
+}
+
+function stringToColor(str = '') {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  const h = Math.abs(hash) % 360;
+  return `hsl(${h},35%,28%)`;
+}
+
+// ═══════════════════════════════════════════════
+// RELATIVE TIME
+// ═══════════════════════════════════════════════
+export function relativeTime(dateStr) {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const s = Math.floor(diff / 1000);
+  if (s < 60)    return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60)    return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24)    return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 7)     return `${d}d`;
+  const w = Math.floor(d / 7);
+  if (w < 5)     return `${w}w`;
+  return new Date(dateStr).toLocaleDateString(undefined, { month:'short', day:'numeric' });
+}
+
+// ═══════════════════════════════════════════════
+// FORMAT NUMBERS
+// ═══════════════════════════════════════════════
+export function formatCount(n = 0) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1_000)     return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K';
+  return String(n);
+}
+
+// ═══════════════════════════════════════════════
+// EMOJI PICKER (lightweight inline)
+// ═══════════════════════════════════════════════
+const QUICK_EMOJIS = ['❤️','😂','😮','😢','😡','👍','🔥','🎉','👀','💯'];
+
+/**
+ * Attach a quick emoji picker to a trigger button.
+ * @param {HTMLElement} trigger
+ * @param {(emoji: string) => void} onPick
+ */
+export function attachEmojiPicker(trigger, onPick) {
+  let picker = null;
+
+  trigger.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (picker) { picker.remove(); picker = null; return; }
+
+    picker = document.createElement('div');
+    picker.style.cssText = `
+      position:absolute;bottom:calc(100% + 8px);right:0;
+      background:var(--bg-raised);border:1px solid var(--border);
+      border-radius:var(--r-md);padding:8px;
+      display:flex;gap:4px;flex-wrap:wrap;width:200px;
+      box-shadow:var(--shadow-md);z-index:500;
+    `;
+    QUICK_EMOJIS.forEach(emoji => {
+      const btn = document.createElement('button');
+      btn.textContent = emoji;
+      btn.style.cssText = 'font-size:1.3rem;padding:4px;border-radius:6px;cursor:pointer;background:none;border:none;transition:background 120ms';
+      btn.onmouseenter = () => btn.style.background = 'var(--bg-surface)';
+      btn.onmouseleave = () => btn.style.background = 'none';
+      btn.addEventListener('click', () => { onPick(emoji); picker.remove(); picker = null; });
+      picker.appendChild(btn);
+    });
+
+    // position relative to trigger's parent
+    const parent = trigger.closest('[style*="position"]') || trigger.parentElement;
+    parent.style.position = 'relative';
+    parent.appendChild(picker);
+
+    const dismiss = (ev) => {
+      if (!picker?.contains(ev.target)) { picker?.remove(); picker = null; document.removeEventListener('click', dismiss); }
+    };
+    setTimeout(() => document.addEventListener('click', dismiss), 0);
+  });
+}
+
+// ═══════════════════════════════════════════════
+// INFINITE SCROLL
+// ═══════════════════════════════════════════════
+/**
+ * Call `callback` when user scrolls near the bottom of `scrollEl`.
+ * @param {HTMLElement|Window} scrollEl
+ * @param {() => Promise<void>} callback  should set a loading flag to debounce
+ * @param {number} threshold  px from bottom
+ * @returns {() => void}  cleanup function
+ */
+export function infiniteScroll(scrollEl, callback, threshold = 300) {
+  const handler = () => {
+    const el = scrollEl === window ? document.documentElement : scrollEl;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distFromBottom < threshold) callback();
+  };
+  scrollEl.addEventListener('scroll', handler, { passive: true });
+  return () => scrollEl.removeEventListener('scroll', handler);
+}
+
+// ═══════════════════════════════════════════════
+// FORM HELPERS
+// ═══════════════════════════════════════════════
+/** Serialize all named inputs in a form element into a plain object. */
+export function serializeForm(formEl) {
+  const data = {};
+  new FormData(formEl).forEach((v, k) => { data[k] = v; });
+  return data;
+}
+
+/** Show/clear an inline error below an input. */
+export function setFieldError(inputEl, message) {
+  let errEl = inputEl.parentElement.querySelector('.field-error');
+  if (!message) { errEl?.remove(); return; }
+  if (!errEl) {
+    errEl = document.createElement('span');
+    errEl.className = 'field-error';
+    errEl.style.cssText = 'color:var(--danger);font-size:.78rem;margin-top:4px;display:block';
+    inputEl.insertAdjacentElement('afterend', errEl);
+  }
+  errEl.textContent = message;
+}
+why evety page black
