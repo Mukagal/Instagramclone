@@ -6,7 +6,10 @@ from sqlalchemy.orm import sessionmaker
 
 async_engine = create_async_engine(
     url=Config.DATABASE_URL,
-    echo=True
+    echo=True, 
+
+    pool_pre_ping=True,
+    pool_recycle=300,
 )
 
 async_session = sessionmaker(
@@ -24,6 +27,6 @@ async def initdb():
 
         print(result.all())
 
-async def get_session() -> AsyncSession: # type: ignore
+async def get_session(): 
     async with async_session() as session:
         yield session
